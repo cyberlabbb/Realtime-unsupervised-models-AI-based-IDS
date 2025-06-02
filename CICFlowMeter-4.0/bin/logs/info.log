@@ -1,0 +1,4 @@
+2025-05-16 16:16:15 - Error while opening file for capture: C:\Desktop\VANN\Chunking\Network_features_data\2000-Chunked-csv\Benign_train\Benign_train_chunk376.pcap: No such file or directory
+2025-06-01 18:00:51 - You select: c:\Desktop\VANN\IDS_Project\pcap_splits\capture_0.pcap
+2025-06-01 18:00:51 - Out folder: c:\Desktop\VANN\IDS_Project\csv_cicflowmeter
+2025-06-01 18:00:52 - CICFlowMeter received 1 pcap file

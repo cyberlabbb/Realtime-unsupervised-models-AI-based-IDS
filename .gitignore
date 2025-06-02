@@ -1,0 +1,8 @@
+Real-time-IDS
+venv
+frontend/build
+node_modules
+frontend/node_modules
+alerts
+SoICT2024_IoMT_Attack_Detection.pdf
+app.log
