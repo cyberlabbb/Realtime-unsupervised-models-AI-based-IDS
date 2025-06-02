@@ -1,9 +1,40 @@
-Real-time-IDS
-venv
-frontend/build
-node_modules
-frontend/node_modules
-alerts
-SoICT2024_IoMT_Attack_Detection.pdf
-app.log
+# Python virtual environment
+venv/
+
+# Node.js dependencies
+node_modules/
+frontend/node_modules/
+
+# React build output
+frontend/build/
+
+# Log files
+*.log
 CICFlowMeter-4.0/bin/logs/
+
+# Local alert output folder
+alerts/
+
+# Compiled files or system files
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE/editor configs
+.vscode/
+.idea/
+
+# PDF or report files
+*.pdf
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Git itself
+.git/
+
+# Optional: exclude data dumps or CSVs
+*.csv
+*.pcap
+*.zip
