@@ -397,6 +397,43 @@ def get_alerts():
         logger.error(f"Failed to fetch alerts: {e}")
         return jsonify({"error": str(e)}), 500
 
+from bson.objectid import ObjectId
+
+
+@app.route("/api/alerts/<alert_id>", methods=["GET"])
+def get_alert_detail(alert_id):
+    """Get detailed information for a specific alert by ID"""
+    try:
+        alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
+
+        if not alert:
+            return jsonify({"error": "Alert not found"}), 404
+
+        # Chuyển ObjectId và datetime sang định dạng JSON
+        alert_json = json.loads(json_util.dumps(alert))
+        return jsonify(alert_json)
+
+    except Exception as e:
+        logger.error(f"Failed to fetch alert {alert_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+from flask import send_file
+
+
+@app.route("/api/download/csv/<alert_id>")
+def download_csv(alert_id):
+    alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
+    if alert and alert.get("csv_path") and os.path.exists(alert["csv_path"]):
+        return send_file(alert["csv_path"], as_attachment=True)
+    return jsonify({"error": "CSV file not found"}), 404
+
+
+@app.route("/api/download/pcap/<alert_id>")
+def download_pcap(alert_id):
+    alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
+    if alert and alert.get("pcap_path") and os.path.exists(alert["pcap_path"]):
+        return send_file(alert["pcap_path"], as_attachment=True)
+    return jsonify({"error": "PCAP file not found"}), 404
+
 
 @app.route("/api/batches/<batch_id>", methods=["GET"])
 def get_batch_details(batch_id):

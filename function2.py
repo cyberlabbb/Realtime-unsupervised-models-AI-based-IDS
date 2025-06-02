@@ -302,7 +302,7 @@ def process_packet_batch(buffer: list, index: int):
         all_predictions.append(batch_result)
 
         if predictions.any():
-            handle_alert(predictions, buffer, index, batch_id)
+            handle_alert(predictions, buffer, index, batch_id, csv_path)
 
     except Exception as e:
         logger.error("Error processing batch %d: %s", index, e)
@@ -316,8 +316,13 @@ def process_packet_batch(buffer: list, index: int):
 
 
 def handle_alert(
-    predictions: np.ndarray, packets: list, index: int, batch_id: str = None
+    predictions: np.ndarray,
+    packets: list,
+    index: int,
+    batch_id: str = None,
+    csv_path: Path = None,
 ):
+
     """Handle intrusion alert"""
     alert_count = np.sum(predictions)
     logger.warning("ALERT: Detected %d anomalies in batch %d", alert_count, index)
@@ -326,6 +331,13 @@ def handle_alert(
     alert_dir.mkdir(exist_ok=True)
     alert_pcap = alert_dir / f"alert_{index}.pcap"
     wrpcap(str(alert_pcap), packets)
+    alert_csv = None
+    if csv_path and csv_path.exists():
+        alert_csv = alert_dir / csv_path.name
+        try:
+            csv_path.rename(alert_csv)  # Di chuyển file CSV vào alert folder
+        except Exception as e:
+            logger.warning(f"Could not move CSV file: {e}")
 
     # Create alert document
     alert_doc = {
@@ -337,6 +349,7 @@ def handle_alert(
         "message": f"Detected {alert_count} anomalies",
         "severity": "high",
         "processed": False,
+        "csv_path": str(alert_csv) if alert_csv else None,
     }
 
     try:
