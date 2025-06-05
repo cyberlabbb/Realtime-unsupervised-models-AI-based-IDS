@@ -1,9 +1,8 @@
 import axios from "axios";
 
-import { getAuthHeader } from './auth';
+import { getAuthHeader } from "./auth";
 
 const getBaseUrl = () => {
-  // Try primary port first, then fallback
   const ports = [5000];
 
   return new Promise(async (resolve) => {
@@ -25,7 +24,7 @@ const getBaseUrl = () => {
 
 let API_BASE = "http://localhost:5000/api";
 const api = axios.create({
-  baseURL: 'http://localhost:5000/api'
+  baseURL: "http://localhost:5000/api",
 });
 const initializeApi = async () => {
   if (!API_BASE) {
@@ -78,23 +77,88 @@ export const getAlertDetail = async (id) => {
     console.error("Error fetching alert detail:", error);
   }
 };
+
+export const getCsvData = async (alertId) => {
+  try {
+    const res = await axios.get(`${API_BASE}/csv/${alertId}`, {
+      transformResponse: [
+        (data) => {
+          try {
+            return JSON.parse(data);
+          } catch (e) {
+            console.error("⚠️ Failed to parse CSV JSON:", e);
+            return {};
+          }
+        },
+      ],
+    });
+    return res.data;
+  } catch (err) {
+    throw new Error("Failed to fetch CSV data");
+  }
+};
+export const deleteAlert = async (alertId) => {
+  const token = localStorage.getItem("token");
+  console.log("Deleting alert with token:", token);
+  return await axios.delete(`${API_BASE}/alerts/${alertId}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+};
+export const getFlows = async (params = {}) => {
+  try {
+    const query = new URLSearchParams(params).toString();
+    const response = await fetch(`http://localhost:5000/api/flows?${query}`);
+    const json = await response.json();
+    return json;
+  } catch (e) {
+    console.error("Failed to fetch flows:", e);
+    return { data: [] };
+  }
+};
+
+
 export const getDownloadCsvUrl = (id) => `${API_BASE}/download/csv/${id}`;
 export const getDownloadPcapUrl = (id) => `${API_BASE}/download/pcap/${id}`;
 
 
-
-
-// Add request interceptor
-api.interceptors.request.use(config => {
-  const authHeader = getAuthHeader();
-  if (authHeader.Authorization) {
-    config.headers.Authorization = authHeader.Authorization;
+export const getCaptureInterface = async () => {
+  try {
+    const response = await axios.get(`${API_BASE}/capture/interface`);
+    return response?.data;
+  } catch (error) {
+    console.error("Error fetching capture interface:", error);
+    return { iface: "", available_ifaces: [] };
   }
-  return config;
-}, error => {
-  return Promise.reject(error);
-});
+};
 
-// Make sure to export the api instance
+export const setCaptureInterface = async (iface) => {
+  try {
+    const response = await axios.post(`${API_BASE}/capture/interface`, {
+      iface,
+    });
+    return response?.data;
+  } catch (error) {
+    console.error("Error setting capture interface:", error);
+    throw error;
+  }
+};
+
+
+
+api.interceptors.request.use(
+  (config) => {
+    const authHeader = getAuthHeader();
+    if (authHeader.Authorization) {
+      config.headers.Authorization = authHeader.Authorization;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+
 export default api;
-

@@ -23,8 +23,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import datetime
 from functools import wraps
+import pandas as pd
 
-# Environment setup
+from collections import Counter
+from bson.regex import Regex
+
+capture_interface = "Wi-Fi" 
+
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 # Configure logging
@@ -59,6 +64,7 @@ try:
     db = client["network_monitor"]
     batches_collection = db["batches"]
     alerts_collection = db["alerts"]
+    flows_collection = db["flows"]
     logger.info("Successfully connected to MongoDB")
 except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {e}")
@@ -116,7 +122,7 @@ def signal_handler(sig, frame):
 def run_sniff():
     """Wrapper function for sniff that respects the stop signal"""
     sniff(
-        iface="Wi-Fi", 
+        iface= capture_interface, 
         prn=handle_packet,
         store=False,
         stop_filter=lambda x: sniff_control.is_set(),
@@ -153,6 +159,37 @@ def stop_packet_capture():
 # --------------------------
 # API Endpoints
 # --------------------------
+
+
+@app.route("/api/capture/interface", methods=["POST"])
+def update_capture_interface():
+    global capture_interface
+    try:
+        data = request.get_json()
+        new_iface = data.get("iface")
+        if not new_iface:
+            return jsonify({"error": "iface is required"}), 400
+
+        capture_interface = new_iface
+        logger.info(f"Interface updated to: {capture_interface}")
+        return jsonify({"message": f"Interface set to {capture_interface}"}), 200
+    except Exception as e:
+        logger.error(f"Failed to update interface: {e}")
+        return jsonify({"error": str(e)}), 500
+
+import psutil
+
+
+@app.route("/api/capture/interface", methods=["GET"])
+def get_capture_interface():
+    try:
+        available_ifaces = list(psutil.net_if_addrs().keys())
+        return jsonify(
+            {"iface": capture_interface, "available_ifaces": available_ifaces}
+        )
+    except Exception as e:
+        logger.error(f"Failed to get interfaces: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
@@ -416,6 +453,41 @@ def get_alert_detail(alert_id):
     except Exception as e:
         logger.error(f"Failed to fetch alert {alert_id}: {e}")
         return jsonify({"error": str(e)}), 500
+
+from flask import jsonify
+import pandas as pd
+import os
+
+
+@app.route("/api/csv/<alert_id>", methods=["GET"])
+def get_csv_data(alert_id):
+    try:
+        alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
+        if not alert:
+            return jsonify({"error": "Alert not found"}), 404
+
+        csv_path = alert.get("csv_path")
+        if not csv_path or not os.path.exists(csv_path):
+            return jsonify({"error": "CSV file not found"}), 404
+
+        df = pd.read_csv(csv_path)
+
+        # 💥 Sửa lỗi Infinity → chuỗi
+        df = df.replace([np.inf, -np.inf], np.nan).fillna("")
+
+        # Ép toàn bộ dữ liệu về kiểu Python native tránh lỗi serialization
+        for col in df.columns:
+            df[col] = df[col].map(lambda x: x.item() if hasattr(x, "item") else x)
+
+        return jsonify(
+            {"columns": list(df.columns), "rows": df.to_dict(orient="records")}
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to return CSV data for alert {alert_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 from flask import send_file
 
 
@@ -435,6 +507,47 @@ def download_pcap(alert_id):
     return jsonify({"error": "PCAP file not found"}), 404
 
 
+@app.route("/api/alerts/<alert_id>", methods=["DELETE"])
+@token_required 
+def delete_alert(current_user, alert_id):
+    try:
+        # First find the alert to get the batch_id
+        alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
+        if not alert:
+            return jsonify({"error": "Alert not found"}), 404
+
+        # Delete associated files
+        if alert.get("pcap_path") and os.path.exists(alert["pcap_path"]):
+            os.remove(alert["pcap_path"])
+        if alert.get("csv_path") and os.path.exists(alert["csv_path"]):
+            os.remove(alert["csv_path"])
+
+        # Delete the alert
+        result = alerts_collection.delete_one({"_id": ObjectId(alert_id)})
+        if result.deleted_count == 0:
+            return jsonify({"error": "Alert not found"}), 404
+
+        # Delete associated batch if it exists
+        if alert.get("batch_id"):
+            batch_result = batches_collection.delete_one({"_id": ObjectId(alert["batch_id"])})
+            logger.info(f"Deleted associated batch: {batch_result.deleted_count > 0}")
+
+            # Also delete any other alerts with the same batch_id
+            alerts_collection.delete_many({
+                "_id": {"$ne": ObjectId(alert_id)},  # Don't delete the current alert again
+                "batch_id": alert["batch_id"]
+            })
+
+        return jsonify({
+            "message": "Alert and associated data deleted successfully",
+            "alert_id": alert_id,
+            "batch_id": alert.get("batch_id")
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to delete alert {alert_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/batches/<batch_id>", methods=["GET"])
 def get_batch_details(batch_id):
     """Get detailed batch information with related alerts"""
@@ -453,6 +566,169 @@ def get_batch_details(batch_id):
     except Exception as e:
         logger.error(f"Failed to fetch batch details: {e}")
         return jsonify({"error": "Failed to fetch batch details"}), 500
+
+
+@app.route("/api/flows", methods=["GET"])
+def get_flows():
+    """
+    Lấy danh sách các flow từ MongoDB. Hỗ trợ filter theo:
+    - batch_index
+    - src_ip (Src IP)
+    - dst_ip (Dst IP)
+    - protocol (Protocol)
+    - label (Label)
+    - limit, skip
+    """
+    try:
+        limit = int(request.args.get("limit", 100))
+        skip = int(request.args.get("skip", 0))
+
+        query = {}
+
+        # Lọc theo batch_index
+        batch_index = request.args.get("batch_index")
+        if batch_index is not None:
+            try:
+                query["batch_index"] = int(batch_index)
+            except ValueError:
+                return jsonify({"error": "batch_index must be an integer"}), 400
+
+        # Lọc theo Src IP
+        src_ip = request.args.get("src_ip")
+        if src_ip:
+            query["Src IP"] = src_ip
+
+        # Lọc theo Dst IP
+        dst_ip = request.args.get("dst_ip")
+        if dst_ip:
+            query["Dst IP"] = dst_ip
+
+        # Lọc theo Protocol
+        protocol = request.args.get("protocol")
+        if protocol:
+            try:
+                query["Protocol"] = int(protocol)
+            except ValueError:
+                return jsonify({"error": "protocol must be an integer"}), 400
+
+        # Lọc theo Label
+        label = request.args.get("label")
+        if label:
+            query["Label"] = label
+
+        raw_flows = list(
+            flows_collection.find(query, {"_id": 0})
+            .sort("Timestamp", -1)
+            .skip(skip)
+            .limit(limit)
+        )
+
+        # ✅ Clean các giá trị không hợp lệ như Infinity
+        import math
+
+        def clean_value(val):
+            if isinstance(val, float) and (math.isinf(val) or math.isnan(val)):
+                return None
+            return val
+
+        def clean_dict(d):
+            return {k: clean_value(v) for k, v in d.items()}
+
+        flows = [clean_dict(f) for f in raw_flows]
+
+        total = flows_collection.count_documents(query)
+
+        return jsonify(
+            {
+                "data": flows,
+                "meta": {
+                    "total": total,
+                    "limit": limit,
+                    "skip": skip,
+                    "filters": query,
+                },
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get flows: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/flows/summary", methods=["GET"])
+def get_flow_summary():
+    try:
+        flows = list(
+            flows_collection.find(
+                {},
+                {
+                    "_id": 0,
+                    "Src IP": 1,
+                    "Dst IP": 1,
+                    "Dst Port": 1,
+                    "Protocol": 1,
+                    "Timestamp": 1,
+                },
+            )
+        )
+
+        # Bộ đếm
+        src_ips = Counter()
+        dst_ips = Counter()
+        dst_ports = Counter()
+        protocols = Counter()
+        traffic_time = Counter()
+
+        for flow in flows:
+            src_ips[flow.get("Src IP")] += 1
+            dst_ips[flow.get("Dst IP")] += 1
+            dst_ports[str(flow.get("Dst Port"))] += 1
+            proto = flow.get("Protocol")
+            protocols[str(proto)] += 1
+
+            # Tổng hợp theo khung giờ
+            ts = flow.get("Timestamp")
+            try:
+                t = datetime.datetime.strptime(ts, "%d/%m/%Y %I:%M:%S %p")
+                label = t.strftime("%H:%M")
+                traffic_time[label] += 1
+            except Exception:
+                continue
+
+        def top_n(counter):
+            return [{"name": k, "value": v} for k, v in counter.most_common(10)]
+
+        return jsonify(
+            {
+                "top_source_ips": top_n(src_ips),
+                "top_destination_ips": top_n(dst_ips),
+                "top_destination_ports": top_n(dst_ports),
+                "top_protocols": top_n(protocols),
+                "traffic_over_time": [
+                    {"time": k, "count": v} for k, v in sorted(traffic_time.items())
+                ],
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to summarize flows: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/batches/<batch_id>", methods=["GET"])
+def get_batch_detail(batch_id):
+    """Get detailed batch information by ObjectId"""
+    try:
+        batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
+        if not batch:
+            return jsonify({"error": "Batch not found"}), 404
+
+        batch_json = json.loads(json_util.dumps(batch))
+        return jsonify(batch_json)
+    except Exception as e:
+        logger.error(f"Failed to fetch batch {batch_id}: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/capture/start", methods=["POST"])
@@ -578,6 +854,8 @@ if __name__ == "__main__":
             allow_unsafe_werkzeug=True,
             use_reloader=False,
             debug=True,
+            
+            
         )
     except Exception as e:
         logger.error(f"Failed to start server: {e}")

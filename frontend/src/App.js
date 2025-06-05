@@ -32,6 +32,10 @@ const AppContent = () => {
   const [batches, setBatches] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [recentAlert, setRecentAlert] = useState(null);
+  const [packets, setPackets] = useState([]);
+ 
+
+  // App.js (chỉnh sửa AppContent)
 
   useEffect(() => {
     const fetchInitialData = async () => {
@@ -52,28 +56,29 @@ const AppContent = () => {
     fetchInitialData();
   }, []);
 
-  useEffect(() => {
-    let cleanupSocket;
+  const dashboardRef = React.useRef();
 
+  useEffect(() => {
     const handleNewAlert = (alert) => {
       setRecentAlert(alert);
       setAlerts((prev) => [alert, ...prev]);
-    };
-
-    const initSocket = async () => {
-      try {
-        cleanupSocket = await setupSocket(handleNewAlert);
-      } catch (error) {
-        console.error("Socket connection failed:", error);
+      if (dashboardRef.current?.showAlertSnackbar) {
+        dashboardRef.current.showAlertSnackbar(alert);
       }
     };
 
-    initSocket();
-
-    return () => {
-      if (cleanupSocket) cleanupSocket();
+    const handleNewPacket = (packet) => {
+      setPackets((prev) => [packet, ...prev].slice(0, 1000)); // Giữ tối đa 1000 gói tin
     };
+
+    // Kết nối socket và đăng ký các handlers
+    setupSocket(handleNewAlert, handleNewPacket).catch((error) => {
+      console.error("Socket connection failed:", error);
+    });
+
+    return () => {};
   }, []);
+
 
   return (
     <>
@@ -88,10 +93,12 @@ const AppContent = () => {
             <PrivateRoute
               element={
                 <Dashboard
-                  status={status}
-                  batches={batches}
-                  alerts={alerts}
-                  recentAlert={recentAlert}
+                ref={dashboardRef}
+                status={status}
+                batches={batches}
+                alerts={alerts}
+                recentAlert={recentAlert}
+                packets={packets}
                 />
               }
             />
@@ -113,10 +120,6 @@ const AppContent = () => {
           }
         />
 
-        <Route
-          path="/alerts/:id"
-          element={<PrivateRoute element={<AlertDetails />} />}
-        />
         <Route
           path="/batches/:id"
           element={<PrivateRoute element={<BatchDetails />} />}

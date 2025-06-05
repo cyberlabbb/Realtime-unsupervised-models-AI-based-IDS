@@ -4,7 +4,9 @@
     "@emotion/styled": "^11.14.0",
     "@mui/material": "^7.0.2",
     "@mui/x-data-grid": "^8.5.0",
-    "mdb-react-ui-kit": "^9.0.0"
+    "dayjs": "^1.11.13",
+    "mdb-react-ui-kit": "^9.0.0",
+    "recharts": "^2.15.3"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.21",

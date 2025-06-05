@@ -103,42 +103,18 @@ export const setupSocket = async (
 
     socketInstance.on("new_packet", (packet) => {
       console.log("Received new packet:", packet);
-      if (onPacketReceived) onPacketReceived(packet);
+      if (onPacketReceived) {
+        onPacketReceived(packet);
+      }
     });
 
     socketInstance.on("intrusion_alert", (alert) => {
       console.log("🚨 Received intrusion alert:", alert);
-
-      // Gọi callback nếu được truyền từ App
       if (onAlert) {
-        onAlert(alert); // 👈 Gọi đúng callback bạn đã truyền từ App
-      }
-
-      if (setProgress && alert.progress) {
-        const { current, total, percentage } = alert.progress;
-        setProgress({
-          text: `${current}/${total}`,
-          percentage: percentage,
-        });
-      }
-
-      if (setAlerts) {
-        setAlerts((prevAlerts) => [
-          {
-            id: alert.id,
-            timestamp: new Date(alert.timestamp * 1000).toLocaleString(),
-            message: alert.message,
-            severity: alert.severity,
-            progress: alert.progress
-              ? `${alert.progress.current}/${
-                  alert.progress.total
-                } (${alert.progress.percentage.toFixed(1)}%)`
-              : null,
-          },
-          ...prevAlerts,
-        ]);
+        onAlert(alert);
       }
     });
+
     
     socketInstance.emit("request_initial_packets", { limit: 100 });
 

@@ -14,14 +14,14 @@ import {
   Alert,
 } from "@mui/material";
 import {
-  getAlertDetail,
+  getBatchDetail,
   getDownloadCsvUrl,
   getDownloadPcapUrl,
   getCsvData,
 } from "../services/api";
-import { CSVLink } from "react-csv";
 import { formatVNDateTime } from "../utils/dateTime";
-const AlertDetailPage = () => {
+
+const BatchDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const [rows, setRows] = useState([]);
@@ -32,29 +32,27 @@ const AlertDetailPage = () => {
   const csvHeaders = columns.map((col) => ({ label: col, key: col }));
 
   useEffect(() => {
-    const fetchAlertData = async () => {
+    const fetchBatchData = async () => {
       try {
-        const alert = await getAlertDetail(id);
-        if (!alert) throw new Error("No alert data received");
-  
+        const batch = await getBatchDetail(id);
+        if (!batch) throw new Error("No batch data received");
+
         const csvResult = await getCsvData(id);
-  
         console.log("📦 Full CSV result:", csvResult);
-        console.log("🧪 Type:", typeof csvResult);
-        console.log("📑 Keys:", Object.keys(csvResult));
-  
+
         setColumns(csvResult?.columns ?? []);
         setRows(csvResult?.rows ?? []);
       } catch (err) {
-        console.error("Failed to load alert data:", err);
-        setError("Không thể tải dữ liệu cảnh báo.");
+        console.error("Failed to load batch data:", err);
+        setError("Không thể tải dữ liệu batch.");
       } finally {
         setLoading(false);
       }
     };
-  
-    fetchAlertData();
+
+    fetchBatchData();
   }, [id]);
+
   const formatTimestamp = (row) => {
     if (row.Timestamp) {
       return formatVNDateTime(row.Timestamp);
@@ -77,6 +75,7 @@ const AlertDetailPage = () => {
         >
           📄 Tải CSV
         </Button>
+
         <Button
           variant="contained"
           color="secondary"
@@ -130,4 +129,4 @@ const AlertDetailPage = () => {
   );
 };
 
-export default AlertDetailPage;
+export default BatchDetailPage;
