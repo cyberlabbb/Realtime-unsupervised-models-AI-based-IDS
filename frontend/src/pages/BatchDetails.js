@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
-import { getBatchDetails } from "../services/api";
+import { getBatchDetail } from "../services/api";
 import {
   Box,
   Typography,
@@ -26,7 +26,7 @@ const BatchDetails = () => {
   useEffect(() => {
     const fetchBatchDetails = async () => {
       try {
-        const response = await getBatchDetails(batchId);
+        const response = await getBatchDetail(batchId);
         setBatch(response.data.batch);
         setLoading(false);
       } catch (err) {

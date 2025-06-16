@@ -42,14 +42,6 @@ export const getStatus = async () => {
   }
 };
 
-export const getAlerts = async () => {
-  try {
-    const response = await axios.get(`${API_BASE}/alerts/all`);
-    return response?.data;
-  } catch (error) {
-    console.error("Error fetching alerts:", error);
-  }
-};
 
 export const getBatches = async () => {
   try {
@@ -60,52 +52,40 @@ export const getBatches = async () => {
   }
 };
 
-export const getBatchDetails = async (batchId) => {
+export const getBatchDetail = async (batchId) => {
   try {
-    const response = await axios.get(`${API_BASE}/batch/${batchId}`);
-    return response?.data;
+    const response = await axios.get(`${API_BASE}/batches/${batchId}`);
+    if (!response.data) {
+      throw new Error("No data received");
+    }
+    return response.data; // Return the full response data
   } catch (error) {
-    console.error("Error fetching batch details:", error);
+    console.error("Error fetching batch detail:", error);
+    throw new Error(error.response?.data?.error || "Batch not found");
   }
 };
 
-export const getAlertDetail = async (id) => {
-  try {
-    const response = await axios.get(`${API_BASE}/alerts/${id}`);
-    return response?.data;
-  } catch (error) {
-    console.error("Error fetching alert detail:", error);
-  }
-};
+// export const getCsvData = async (alertId) => {
+//   try {
+//     const res = await axios.get(`${API_BASE}/csv/${alertId}`, {
+//       transformResponse: [
+//         (data) => {
+//           try {
+//             return JSON.parse(data);
+//           } catch (e) {
+//             console.error("⚠️ Failed to parse CSV JSON:", e);
+//             return {};
+//           }
+//         },
+//       ],
+//     });
+//     return res.data;
+//   } catch (err) {
+//     throw new Error("Failed to fetch CSV data");
+//   }
+// };
 
-export const getCsvData = async (alertId) => {
-  try {
-    const res = await axios.get(`${API_BASE}/csv/${alertId}`, {
-      transformResponse: [
-        (data) => {
-          try {
-            return JSON.parse(data);
-          } catch (e) {
-            console.error("⚠️ Failed to parse CSV JSON:", e);
-            return {};
-          }
-        },
-      ],
-    });
-    return res.data;
-  } catch (err) {
-    throw new Error("Failed to fetch CSV data");
-  }
-};
-export const deleteAlert = async (alertId) => {
-  const token = localStorage.getItem("token");
-  console.log("Deleting alert with token:", token);
-  return await axios.delete(`${API_BASE}/alerts/${alertId}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-};
+
 export const getFlows = async (params = {}) => {
   try {
     const query = new URLSearchParams(params).toString();
@@ -145,7 +125,27 @@ export const setCaptureInterface = async (iface) => {
   }
 };
 
-
+export const deleteBatch = async (batchId) => {
+  try {
+    const response = await axios.delete(`${API_BASE}/batches/${batchId}`);
+    if (response.data.warning) {
+      console.warn("Deletion warning:", response.data.warning);
+    }
+    return response.data;
+  } catch (error) {
+    console.error("Error deleting batch:", error);
+    throw new Error(error.response?.data?.message || "Failed to delete batch");
+  }
+};
+export const updateBatch = async (batchId, data) => {
+  try {
+    const response = await axios.patch(`${API_BASE}/batches/${batchId}`, data);
+    return response?.data;
+  } catch (error) {
+    console.error("Error updating batch:", error);
+    throw error;
+  }
+};
 
 api.interceptors.request.use(
   (config) => {
@@ -159,6 +159,58 @@ api.interceptors.request.use(
     return Promise.reject(error);
   }
 );
+export const getCsvData = async (batchId) => {
+  try {
+    const response = await axios.get(`${API_BASE}/csv/${batchId}`);
+
+    // Check if response exists
+    if (!response.data) {
+      throw new Error("No data received");
+    }
+
+    // If data is a string, try to parse it
+    let parsedData =
+      typeof response.data === "string"
+        ? JSON.parse(response.data)
+        : response.data;
+
+    // Validate the structure
+    if (!Array.isArray(parsedData.columns) || !Array.isArray(parsedData.rows)) {
+      throw new Error("Invalid data structure");
+    }
+
+    return {
+      columns: parsedData.columns,
+      rows: parsedData.rows,
+    };
+  } catch (error) {
+    console.error("Failed to fetch CSV data:", error);
+    throw new Error(
+      error.response?.data?.error || error.message || "Failed to fetch CSV data"
+    );
+  }
+};
 
 
+export const selectModel = async (modelName) => {
+  try {
+    const response = await axios.post(`${API_BASE}/model/select`, {
+      model: modelName,
+    });
+    return response.data;
+  } catch (error) {
+    console.error("Failed to select model:", error);
+    throw error.response?.data?.error || "Failed to select model";
+  }
+};
+
+export const getCurrentModel = async () => {
+  try {
+    const response = await axios.get(`${API_BASE}/model/current`);
+    return response.data;
+  } catch (error) {
+    console.error("Failed to get current model:", error);
+    throw error.response?.data?.error || "Failed to get current model";
+  }
+};
 export default api;

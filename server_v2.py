@@ -15,10 +15,8 @@ from scapy.all import sniff
 import numpy as np
 import os
 from bson import ObjectId, json_util
-from flask import jsonify
 import json
 from socket_instance import socketio, app
-from function2 import handle_packet
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import datetime
@@ -27,12 +25,12 @@ import pandas as pd
 
 from collections import Counter
 from bson.regex import Regex
+from model_state import set_model
 
 capture_interface = "Wi-Fi" 
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -40,15 +38,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# Thread management
 executor = ThreadPoolExecutor(max_workers=4)
 lock = threading.Lock()
 
-# Load environment variables
 load_dotenv()
 
-# MongoDB setup
 try:
     mongo_uri = os.environ.get("MONGO_URI")
     if not mongo_uri:
@@ -70,7 +64,6 @@ except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {e}")
     sys.exit(1)
 
-# Directory setup
 BASE_DIR = Path(__file__).parent
 OUTPUT_DIR = BASE_DIR / "pcap_splits"
 CSV_OUTPUT_DIR = BASE_DIR / "csv_cicflowmeter"
@@ -78,7 +71,6 @@ CICFLOWMETER_DIR = BASE_DIR / "CICFlowMeter-4.0" / "bin"
 ALERT_DIR = BASE_DIR / "alerts"
 MODEL_DIR = BASE_DIR / "Model"
 
-# Create required directories
 required_dirs = [OUTPUT_DIR, CSV_OUTPUT_DIR, ALERT_DIR, CICFLOWMETER_DIR, MODEL_DIR]
 for directory in required_dirs:
     try:
@@ -87,7 +79,6 @@ for directory in required_dirs:
         logger.error(f"Failed to create directory {directory}: {e}")
         sys.exit(1)
 
-# Global state
 packet_count = 0
 packet_buffer = []
 file_index = 0
@@ -95,6 +86,7 @@ all_predictions = []
 sniff_thread = None
 sniff_control = threading.Event()
 is_sniffing = False
+
 
 # --------------------------
 # Helper Functions
@@ -382,190 +374,169 @@ def get_batches():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/alerts/all", methods=["GET"])
-def get_all_alerts():
-    """Lấy toàn bộ alerts với xử lý ObjectId"""
+@app.route("/api/batches/<batch_id>", methods=["DELETE"])
+def delete_batch(batch_id):
+    """Delete a batch and its associated files"""
     try:
-        # Tạo hàm hỗ trợ chuyển đổi ObjectId
-        def parse_json(data):
-            return json.loads(json_util.dumps(data))
+        # Find the batch first
+        batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
+        if not batch:
+            return jsonify({"error": "Batch not found"}), 404
 
-        alerts = list(alerts_collection.find({}))
+        # Delete associated files
+        files_to_delete = []
+        if batch.get("pcap_file_path"):
+            files_to_delete.append(Path(batch["pcap_file_path"]))
+        if batch.get("csv_file_path"):
+            files_to_delete.append(Path(batch["csv_file_path"]))
 
-        return jsonify({"data": parse_json(alerts), "total": len(alerts)})
+        # Try to delete each file
+        deleted_files = []
+        failed_files = []
+        for file_path in files_to_delete:
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+                    deleted_files.append(str(file_path))
+            except Exception as e:
+                logger.error(f"Failed to delete file {file_path}: {e}")
+                failed_files.append(str(file_path))
+
+        # Delete batch directory if it exists
+        try:
+            batch_dir = Path(batch.get("pcap_file_path")).parent
+            if batch_dir.exists() and batch_dir.is_dir():
+                shutil.rmtree(batch_dir)
+        except Exception as e:
+            logger.error(f"Failed to delete batch directory: {e}")
+
+        # Delete from database
+        result = batches_collection.delete_one({"_id": ObjectId(batch_id)})
+
+        response = {
+            "message": "Batch deleted successfully",
+            "deleted_files": deleted_files,
+        }
+        if failed_files:
+            response["failed_files"] = failed_files
+            response["warning"] = "Some files could not be deleted"
+
+        return jsonify(response)
 
     except Exception as e:
-        return jsonify({"error": "Internal server error", "details": str(e)}), 500
-
-
-@app.route("/api/alerts", methods=["GET"])
-def get_alerts():
-    """Get recent alerts from MongoDB with filtering options"""
-    try:
-        limit = int(request.args.get("limit", 50))
-        skip = int(request.args.get("skip", 0))
-        severity = request.args.get("severity")
-
-        query = {}
-        if severity:
-            query["severity"] = severity.upper()
-
-        alerts = list(
-            alerts_collection.find(query, {"_id": 0})
-            .sort("timestamp", -1)
-            .skip(skip)
-            .limit(limit)
-        )
-
-        total = alerts_collection.count_documents(query)
-
-        return jsonify(
-            {
-                "data": alerts,
-                "meta": {
-                    "total": total,
-                    "limit": limit,
-                    "skip": skip,
-                    "severity_filter": severity,
-                },
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to fetch alerts: {e}")
+        logger.error(f"Failed to delete batch {batch_id}: {e}")
         return jsonify({"error": str(e)}), 500
 
-from bson.objectid import ObjectId
 
-
-@app.route("/api/alerts/<alert_id>", methods=["GET"])
-def get_alert_detail(alert_id):
-    """Get detailed information for a specific alert by ID"""
+@app.route("/api/batches/<batch_id>", methods=["PATCH"])
+def update_batch(batch_id):
+    """Update batch information"""
     try:
-        alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
+        update_data = request.get_json()
+        if not update_data:
+            return jsonify({"error": "No update data provided"}), 400
 
-        if not alert:
-            return jsonify({"error": "Alert not found"}), 404
+        # Only allow updating certain fields
+        allowed_fields = ["note"]
+        update_dict = {k: v for k, v in update_data.items() if k in allowed_fields}
 
-        # Chuyển ObjectId và datetime sang định dạng JSON
-        alert_json = json.loads(json_util.dumps(alert))
-        return jsonify(alert_json)
-
-    except Exception as e:
-        logger.error(f"Failed to fetch alert {alert_id}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-from flask import jsonify
-import pandas as pd
-import os
-
-
-@app.route("/api/csv/<alert_id>", methods=["GET"])
-def get_csv_data(alert_id):
-    try:
-        alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
-        if not alert:
-            return jsonify({"error": "Alert not found"}), 404
-
-        csv_path = alert.get("csv_path")
-        if not csv_path or not os.path.exists(csv_path):
-            return jsonify({"error": "CSV file not found"}), 404
-
-        df = pd.read_csv(csv_path)
-
-        # 💥 Sửa lỗi Infinity → chuỗi
-        df = df.replace([np.inf, -np.inf], np.nan).fillna("")
-
-        # Ép toàn bộ dữ liệu về kiểu Python native tránh lỗi serialization
-        for col in df.columns:
-            df[col] = df[col].map(lambda x: x.item() if hasattr(x, "item") else x)
-
-        return jsonify(
-            {"columns": list(df.columns), "rows": df.to_dict(orient="records")}
+        result = batches_collection.update_one(
+            {"_id": ObjectId(batch_id)}, {"$set": update_dict}
         )
 
+        if result.modified_count == 0:
+            return jsonify({"error": "Batch not found or no changes made"}), 404
+
+        return jsonify({"message": "Batch updated successfully"})
     except Exception as e:
-        logger.error(f"Failed to return CSV data for alert {alert_id}: {e}")
+        logger.error(f"Failed to update batch {batch_id}: {e}")
         return jsonify({"error": str(e)}), 500
 
 
 from flask import send_file
 
 
-@app.route("/api/download/csv/<alert_id>")
-def download_csv(alert_id):
-    alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
-    if alert and alert.get("csv_path") and os.path.exists(alert["csv_path"]):
-        return send_file(alert["csv_path"], as_attachment=True)
+@app.route("/api/download/csv/<batch_id>")
+def download_csv(batch_id):
+    batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
+    if batch and batch.get("csv_file_path") and os.path.exists(batch["csv_file_path"]):
+        return send_file(batch["csv_file_path"], as_attachment=True)
     return jsonify({"error": "CSV file not found"}), 404
 
 
-@app.route("/api/download/pcap/<alert_id>")
-def download_pcap(alert_id):
-    alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
-    if alert and alert.get("pcap_path") and os.path.exists(alert["pcap_path"]):
-        return send_file(alert["pcap_path"], as_attachment=True)
+@app.route("/api/download/pcap/<batch_id>")
+def download_pcap(batch_id):
+    batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
+    if (
+        batch
+        and batch.get("pcap_file_path")
+        and os.path.exists(batch["pcap_file_path"])
+    ):
+        return send_file(batch["pcap_file_path"], as_attachment=True)
     return jsonify({"error": "PCAP file not found"}), 404
 
 
-@app.route("/api/alerts/<alert_id>", methods=["DELETE"])
-@token_required 
-def delete_alert(current_user, alert_id):
-    try:
-        # First find the alert to get the batch_id
-        alert = alerts_collection.find_one({"_id": ObjectId(alert_id)})
-        if not alert:
-            return jsonify({"error": "Alert not found"}), 404
-
-        # Delete associated files
-        if alert.get("pcap_path") and os.path.exists(alert["pcap_path"]):
-            os.remove(alert["pcap_path"])
-        if alert.get("csv_path") and os.path.exists(alert["csv_path"]):
-            os.remove(alert["csv_path"])
-
-        # Delete the alert
-        result = alerts_collection.delete_one({"_id": ObjectId(alert_id)})
-        if result.deleted_count == 0:
-            return jsonify({"error": "Alert not found"}), 404
-
-        # Delete associated batch if it exists
-        if alert.get("batch_id"):
-            batch_result = batches_collection.delete_one({"_id": ObjectId(alert["batch_id"])})
-            logger.info(f"Deleted associated batch: {batch_result.deleted_count > 0}")
-
-            # Also delete any other alerts with the same batch_id
-            alerts_collection.delete_many({
-                "_id": {"$ne": ObjectId(alert_id)},  # Don't delete the current alert again
-                "batch_id": alert["batch_id"]
-            })
-
-        return jsonify({
-            "message": "Alert and associated data deleted successfully",
-            "alert_id": alert_id,
-            "batch_id": alert.get("batch_id")
-        })
-
-    except Exception as e:
-        logger.error(f"Failed to delete alert {alert_id}: {e}")
-        return jsonify({"error": str(e)}), 500
-
 @app.route("/api/batches/<batch_id>", methods=["GET"])
-def get_batch_details(batch_id):
-    """Get detailed batch information with related alerts"""
+def get_batch_detail(batch_id):
+    """Get detailed information for a specific batch by ID"""
     try:
-        batch = batches_collection.find_one({"batch_name": batch_id}, {"_id": 0})
+        batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
+
         if not batch:
             return jsonify({"error": "Batch not found"}), 404
 
-        alerts = list(
-            alerts_collection.find({"batch_id": batch_id}, {"_id": 0})
-            .sort("timestamp", -1)
-            .limit(100)
+        def serialize_batch(batch_data):
+            if isinstance(batch_data, dict):
+                return {
+                    key: (
+                        str(value)
+                        if isinstance(value, ObjectId)
+                        else (
+                            value.isoformat()
+                            if isinstance(value, datetime.datetime)
+                            else serialize_batch(value)
+                        )
+                    )
+                    for key, value in batch_data.items()
+                }
+            elif isinstance(batch_data, list):
+                return [serialize_batch(item) for item in batch_data]
+            return batch_data
+
+        serialized_batch = serialize_batch(batch)
+
+        return jsonify(
+            {"batch": serialized_batch, "message": "Batch found successfully"}
         )
 
-        return jsonify({"batch": batch, "alerts": alerts, "alert_count": len(alerts)})
     except Exception as e:
-        logger.error(f"Failed to fetch batch details: {e}")
-        return jsonify({"error": "Failed to fetch batch details"}), 500
+        logger.error(f"Failed to fetch batch {batch_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/csv/<batch_id>")
+def get_csv_data(batch_id):
+    """Get CSV data for a specific batch"""
+    try:
+        batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
+        if not batch or not batch.get("csv_file_path"):
+            return jsonify({"error": "CSV file not found"}), 404
+
+        csv_path = batch["csv_file_path"]
+        if not os.path.exists(csv_path):
+            return jsonify({"error": "CSV file missing from disk"}), 404
+        df = pd.read_csv(csv_path)
+
+
+        df = df.replace([np.inf, -np.inf], ["Infinity", "-Infinity"])
+        df = df.fillna("null")
+        result = {"columns": df.columns.tolist(), "rows": df.to_dict("records")}
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Failed to get CSV data for batch {batch_id}: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/flows", methods=["GET"])
@@ -686,11 +657,10 @@ def get_flow_summary():
             proto = flow.get("Protocol")
             protocols[str(proto)] += 1
 
-            # Tổng hợp theo khung giờ
             ts = flow.get("Timestamp")
             try:
                 t = datetime.datetime.strptime(ts, "%d/%m/%Y %I:%M:%S %p")
-                label = t.strftime("%H:%M")
+                label = t.isoformat()  # chuyển sang dạng chuẩn ISO 8601
                 traffic_time[label] += 1
             except Exception:
                 continue
@@ -714,22 +684,6 @@ def get_flow_summary():
     except Exception as e:
         logger.error(f"Failed to summarize flows: {e}")
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/batches/<batch_id>", methods=["GET"])
-def get_batch_detail(batch_id):
-    """Get detailed batch information by ObjectId"""
-    try:
-        batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
-        if not batch:
-            return jsonify({"error": "Batch not found"}), 404
-
-        batch_json = json.loads(json_util.dumps(batch))
-        return jsonify(batch_json)
-    except Exception as e:
-        logger.error(f"Failed to fetch batch {batch_id}: {e}")
-        return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/capture/start", methods=["POST"])
 def api_start_capture():
@@ -795,6 +749,26 @@ def api_capture_status():
             "last_processed": file_index,
         }
     )
+
+
+from model_state import set_model  # thêm dòng này
+
+@app.route("/api/model/select", methods=["POST"])
+def select_model():
+    data = request.get_json()
+    model_name = data.get("model")
+    if model_name not in ["autoencoder", "kmeans", "svm"]:
+        return jsonify({"status": "error", "message": "Invalid model"}), 400
+    set_model(model_name)  # ✅ cập nhật model qua setter
+    return jsonify({"status": "success", "model": model_name})
+
+
+from model_state import get_model  # thêm dòng này
+
+
+@app.route("/api/model/current", methods=["GET"])
+def get_current_model():
+    return jsonify({"model": get_model()})  # ✅ dùng getter
 
 
 @socketio.on("connect")

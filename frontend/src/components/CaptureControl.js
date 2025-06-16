@@ -1,10 +1,10 @@
 import React from "react";
-import { Button, Box, CircularProgress, Typography } from "@mui/material";
-import { PlayArrow, Stop } from "@mui/icons-material";
+import { Chip, Button, Box, CircularProgress, Typography } from "@mui/material";
+import { PlayArrow, Stop, } from "@mui/icons-material";
 import axios from "axios";
 import { useCapture } from "../contexts/CaptureContext";
 import { getSocket } from "../services/socket";
-const CaptureControl = () => {
+const CaptureControl = ({ currentModel }) => {
   const { isCapturing, setIsCapturing } = useCapture();
   const [loading, setLoading] = React.useState(false);
 
@@ -25,19 +25,26 @@ const CaptureControl = () => {
 
   const handleStart = async () => {
     const socket = getSocket();
-     if (socket) {
-       socket.emit("start_capture");
-     }
+    if (socket) {
+      socket.emit("start_capture");
+    }
+
     setLoading(true);
     try {
-      await axios.post("http://localhost:5000/api/capture/start");
+      const res = await axios.post("http://localhost:5000/api/capture/start");
       setIsCapturing(true);
     } catch (error) {
-      console.error("Error starting capture:", error);
+      const errMsg = error.response?.data?.message || "Unknown error";
+      console.error("Error starting capture:", errMsg);
+
+      if (errMsg === "Capture already running") {
+        setIsCapturing(true); // Cập nhật UI đúng trạng thái
+      }
     } finally {
       setLoading(false);
     }
   };
+  
 
   const handleStop = async () => {
     setLoading(true);
@@ -78,6 +85,13 @@ const CaptureControl = () => {
           >
             Stop
           </Button>
+          {currentModel && (
+            <Chip
+              size="small"
+              label={`Active Model: ${currentModel.toUpperCase()}`}
+              color="primary"
+            />
+          )}
         </>
       )}
     </Box>

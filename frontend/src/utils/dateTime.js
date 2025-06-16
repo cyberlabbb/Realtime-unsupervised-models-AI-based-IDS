@@ -5,7 +5,7 @@ export const formatVNDateTime = (input) => {
     const timestamp = input.$date ? new Date(input.$date) : new Date(input);
 
     // Trừ 7 giờ vì thời gian MongoDB đã là GMT+7
-    const adjusted = new Date(timestamp.getTime() - 7 * 60 * 60 * 1000);
+    const adjusted = new Date(timestamp.getTime());
 
     const pad = (n) => n.toString().padStart(2, "0");
 

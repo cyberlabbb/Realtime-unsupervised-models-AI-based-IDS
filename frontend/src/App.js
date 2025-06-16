@@ -1,9 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
+
 import {
   BrowserRouter as Router,
   Routes,
   Route,
   Navigate,
+  useNavigate,
 } from "react-router-dom";
 import { CssBaseline } from "@mui/material";
 
@@ -11,15 +13,14 @@ import Header from "./components/Header";
 import Dashboard from "./components/Dashboard";
 import Login from "./components/Auth/Login";
 import Register from "./components/Auth/Register";
-import AlertDetails from "./pages/AlertDetails";
 import BatchDetails from "./pages/BatchDetails";
-import Statistics from "./pages/Statistics"; // 👈 nếu bạn đã tạo trang thống kê
-import AlertDetailPage from "./pages/AlertDetailPage";
+import BatchDetailPage from "./pages/BatchDetailPage";
+import Statistics from "./pages/Statistics";
 
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { CaptureProvider } from "./contexts/CaptureContext";
 
-import { getAlerts, getBatches, getStatus } from "./services/api";
+import { getBatches, getStatus } from "./services/api";
 import { setupSocket } from "./services/socket";
 
 const PrivateRoute = ({ element }) => {
@@ -30,24 +31,23 @@ const PrivateRoute = ({ element }) => {
 const AppContent = () => {
   const [status, setStatus] = useState(null);
   const [batches, setBatches] = useState([]);
-  const [alerts, setAlerts] = useState([]);
-  const [recentAlert, setRecentAlert] = useState(null);
   const [packets, setPackets] = useState([]);
- 
-
-  // App.js (chỉnh sửa AppContent)
-
+  const dashboardRef = React.useRef();
+  const navigate = useNavigate();
+  const [capturedPackets, setCapturedPackets] = useState([]);
+  const [isCapturingActive, setIsCapturingActive] = useState(false);
+  const bufferRef = useRef([]);
+  const updateTimerRef = useRef(null);
+  
   useEffect(() => {
     const fetchInitialData = async () => {
       try {
-        const [statusRes, batchRes, alertRes] = await Promise.all([
+        const [statusRes, batchRes] = await Promise.all([
           getStatus(),
           getBatches(),
-          getAlerts(),
         ]);
         setStatus(statusRes);
         setBatches(batchRes.data || []);
-        setAlerts(alertRes.data || []);
       } catch (error) {
         console.error("Error loading initial data:", error);
       }
@@ -56,29 +56,50 @@ const AppContent = () => {
     fetchInitialData();
   }, []);
 
-  const dashboardRef = React.useRef();
-
   useEffect(() => {
-    const handleNewAlert = (alert) => {
-      setRecentAlert(alert);
-      setAlerts((prev) => [alert, ...prev]);
-      if (dashboardRef.current?.showAlertSnackbar) {
-        dashboardRef.current.showAlertSnackbar(alert);
+    const handleNewPacket = (packet) => {
+      bufferRef.current.push(packet);
+
+      if (!updateTimerRef.current) {
+        updateTimerRef.current = setTimeout(() => {
+          setPackets((prev) => {
+            const combined = [...bufferRef.current, ...prev].slice(0, 1000);
+            bufferRef.current = [];
+            return combined;
+          });
+          updateTimerRef.current = null;
+        }, 500); // Cập nhật mỗi 500ms
       }
     };
 
-    const handleNewPacket = (packet) => {
-      setPackets((prev) => [packet, ...prev].slice(0, 1000)); // Giữ tối đa 1000 gói tin
+    const handleNewBatch = (batch) => {
+      setBatches((prev) => [batch, ...prev]);
     };
 
-    // Kết nối socket và đăng ký các handlers
-    setupSocket(handleNewAlert, handleNewPacket).catch((error) => {
-      console.error("Socket connection failed:", error);
-    });
+    const handleNewAlert = (alert) => {
+      const notification = new Notification("Network Intrusion Alert!", {
+        body: alert.message || "Potential intrusion detected",
+        icon: "/warning.png",
+      });
+
+      notification.onclick = () => {
+        window.focus();
+        navigate(`/batches/${alert.batch_id}`);
+      };
+    };
+
+    if (Notification.permission !== "granted") {
+      Notification.requestPermission();
+    }
+
+    setupSocket(handleNewBatch, handleNewPacket, handleNewAlert).catch(
+      (error) => {
+        console.error("Socket connection failed:", error);
+      }
+    );
 
     return () => {};
   }, []);
-
 
   return (
     <>
@@ -93,12 +114,10 @@ const AppContent = () => {
             <PrivateRoute
               element={
                 <Dashboard
-                ref={dashboardRef}
-                status={status}
-                batches={batches}
-                alerts={alerts}
-                recentAlert={recentAlert}
-                packets={packets}
+                  ref={dashboardRef}
+                  status={status}
+                  batches={batches}
+                  packets={packets}
                 />
               }
             />
@@ -107,28 +126,14 @@ const AppContent = () => {
 
         <Route
           path="/statistics"
-          element={
-            <PrivateRoute
-              element={
-                <Statistics
-                  alerts={alerts}
-                  batches={batches}
-                  packets={[]} // 👈 nếu muốn truyền packets, cần thêm capture context
-                />
-              }
-            />
-          }
+          element={<PrivateRoute element={<Statistics packets={packets} />} />}
         />
 
         <Route
           path="/batches/:id"
-          element={<PrivateRoute element={<BatchDetails />} />}
+          element={<PrivateRoute element={<BatchDetailPage />} />}
         />
         <Route path="*" element={<Navigate to="/dashboard" />} />
-        <Route
-          path="/alerts/:id"
-          element={<PrivateRoute element={<AlertDetailPage />} />}
-        />
       </Routes>
     </>
   );

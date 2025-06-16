@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo, forwardRef } from "react";
+import React, { useState, useEffect, useMemo, forwardRef, useRef } from "react";
+
 import {
   Box,
   Typography,
@@ -16,35 +17,75 @@ import {
   Select,
   MenuItem,
 } from "@mui/material";
+import { Snackbar } from "@mui/material";
 import StatusPanel from "./StatusPanel";
 import TrafficChart from "./TrafficChart";
 import CaptureControl from "./CaptureControl";
 import PacketTable from "./PacketTable";
 import { useCapture } from "../contexts/CaptureContext";
-import { setupSocket } from "../services/socket";
+import { setupSocket, closeSocket } from "../services/socket";
 import authService from "../services/auth";
 import { useNavigate } from "react-router-dom";
-import { getAlerts } from "../services/api";
+import { getCurrentModel, selectModel } from "../services/api";
 import { ArrowForward } from "@mui/icons-material";
 import { getCaptureInterface, setCaptureInterface } from "../services/api";
 
 const Dashboard = forwardRef(
-  (
-    { status, batches, alerts: propAlerts, recentAlert, packets: propPackets },
-    ref
-  ) => {
+  ({ status, batches, packets: propPackets }, ref) => {
     const navigate = useNavigate();
     const { isCapturing } = useCapture();
     const [filter, setFilter] = useState("");
-    const [alerts, setAlerts] = useState(propAlerts || []);
-    const [alertPackets, setAlertPackets] = useState([]);
     const [dialogOpen, setDialogOpen] = useState(false);
     const [alertDialogOpen, setAlertDialogOpen] = useState(false);
     const [snackbarMessage, setSnackbarMessage] = useState("");
     const isMobile = useMediaQuery("(max-width:600px)");
-
+    const [notification, setNotification] = useState(null);
     const [iface, setIface] = useState("");
     const [ifaceList, setIfaceList] = useState([]);
+    const [localBatches, setLocalBatches] = useState(batches || []);
+    const [model, setModel] = useState("");
+    const [modelList] = useState(["autoencoder", "kmeans", "svm"]);
+
+    const [alertMessage, setAlertMessage] = useState("");
+    const [showAlert, setShowAlert] = useState(false);
+
+    
+
+    const handleCloseNotification = () => {
+      setNotification(null);
+    };
+
+    useEffect(() => {
+      const fetchCurrentModel = async () => {
+        try {
+          const data = await getCurrentModel();
+          if (data.model) {
+            setModel(data.model);
+            console.log("Current model:", data.model);
+          }
+        } catch (e) {
+          console.error("Failed to fetch current model:", e);
+          setNotification("Failed to fetch current model");
+        }
+      };
+      fetchCurrentModel();
+    }, []);
+
+    // Update model change handler
+    const handleModelChange = async (event) => {
+      const selected = event.target.value;
+      try {
+        const response = await selectModel(selected);
+        if (response.status === "success") {
+          setModel(selected);
+          setNotification(`Model changed to ${selected.toUpperCase()}`);
+          console.log("Model changed successfully:", selected);
+        }
+      } catch (e) {
+        console.error("Failed to update model:", e);
+        setNotification("Failed to update model");
+      }
+    };
 
     useEffect(() => {
       const fetchInterface = async () => {
@@ -54,7 +95,9 @@ const Dashboard = forwardRef(
       };
       fetchInterface();
     }, []);
-    
+    useEffect(() => {
+      setLocalBatches(batches || []);
+    }, [batches]);
 
     const handleIfaceChange = async (event) => {
       const selected = event.target.value;
@@ -65,7 +108,6 @@ const Dashboard = forwardRef(
         console.error("Failed to update capture interface:", e);
       }
     };
-    
 
     const filteredPackets = useMemo(() => {
       if (!filter) return propPackets;
@@ -79,40 +121,6 @@ const Dashboard = forwardRef(
           (packet.info && packet.info.toLowerCase().includes(lower))
       );
     }, [propPackets, filter]);
-
-    useEffect(() => {
-      if (propAlerts) {
-        setAlerts(propAlerts);
-        if (propAlerts.length > alerts.length) {
-          const alertsPanel = document.querySelector("#alerts-panel");
-          if (alertsPanel) alertsPanel.scrollTop = 0;
-        }
-      }
-    }, [propAlerts]);
-  
-
-    useEffect(() => {
-      const user = authService.getCurrentUser();
-      if (!user) navigate("/login");
-    }, [navigate]);
-
-
-    useEffect(() => {
-      if (recentAlert) {
-        const lastAlertTime = localStorage.getItem("lastAlertTime");
-        const currentAlertTime = new Date(
-          recentAlert.timestamp?.$date || recentAlert.timestamp
-        ).getTime();
-
-    
-        if (!lastAlertTime || currentAlertTime > parseInt(lastAlertTime)) {
-          setSnackbarMessage(recentAlert.message || "New alert");
-          setAlertDialogOpen(true);
-          localStorage.setItem("lastAlertTime", currentAlertTime.toString());
-        }
-      }
-    }, [recentAlert]);
-
 
     const exportPackets = () => {
       const dataStr = JSON.stringify(propPackets, null, 2);
@@ -130,40 +138,93 @@ const Dashboard = forwardRef(
       [filteredPackets]
     );
 
-    const sortedAlerts = [...alerts].sort((a, b) => {
-      const ta = new Date(a.timestamp?.$date || a.timestamp).getTime();
-      const tb = new Date(b.timestamp?.$date || b.timestamp).getTime();
-      return tb - ta;
-    });
+    const sortedBatches = useMemo(() => {
+      if (!localBatches || localBatches.length === 0) return [];
+      return [...localBatches].sort((a, b) => {
+        const getTime = (date) => new Date(date?.$date || date).getTime();
+        return getTime(b.created_at) - getTime(a.created_at);
+      });
+    }, [localBatches]);
 
+    useEffect(() => {
+      if (Notification.permission !== "granted") {
+        Notification.requestPermission();
+      }
+
+      const handleNewBatch = (batch) => {
+        console.log("📦 NEW BATCH RECEIVED:", batch);
+        setLocalBatches((prev) => [batch, ...prev]);
+      };
+
+      const handleNewAlert = (alert) => {
+        console.log("🚨 NEW ALERT RECEIVED:", alert);
+        setAlertMessage(alert.message || "Có tấn công mạng");
+        setShowAlert(true);
+      };
+
+      setupSocket(handleNewBatch, null, handleNewAlert).catch((error) => {
+        console.error("❌ Socket connection failed:", error);
+        setNotification("Failed to connect to server");
+      });
+
+      return () => {
+        closeSocket();
+      };
+    }, [navigate]);
+    
+
+    const buffer = useRef([]);
+    const timer = useRef(null);
     return (
       <Box sx={{ width: "100%", px: isMobile ? 1 : 4, py: 3 }}>
         <Box sx={{ display: "flex", justifyContent: "space-between", mb: 2 }}>
           <Typography variant="h4">
             Network Intrusion Detection System
           </Typography>
-          <FormControl size="small" disabled={isCapturing}>
-            <InputLabel id="iface-label">Interface</InputLabel>
-            <Select
-              labelId="iface-label"
-              value={iface}
-              label="Interface"
-              onChange={handleIfaceChange}
-              sx={{ minWidth: 150 }}
-            >
-              {ifaceList.map((opt) => (
-                <MenuItem key={opt} value={opt}>
-                  {opt}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
+
+          <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
+            <FormControl size="small" disabled={isCapturing}>
+              <InputLabel id="iface-label">Interface</InputLabel>
+              <Select
+                labelId="iface-label"
+                value={iface}
+                label="Interface"
+                onChange={handleIfaceChange}
+                sx={{ minWidth: 150 }}
+              >
+                {ifaceList.map((opt) => (
+                  <MenuItem key={opt} value={opt}>
+                    {opt}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+              <FormControl size="small" disabled={isCapturing}>
+                <InputLabel id="model-label">Model</InputLabel>
+                <Select
+                  labelId="model-label"
+                  value={model}
+                  label="Model"
+                  onChange={handleModelChange}
+                  sx={{ minWidth: 150 }}
+                  disabled={isCapturing}
+                >
+                  {modelList.map((opt) => (
+                    <MenuItem key={opt} value={opt}>
+                      {opt.toUpperCase()}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Box>
+          </Box>
         </Box>
 
         <Box sx={{ mb: 3 }}>
-          <CaptureControl />
+          <CaptureControl currentModel={model} />
         </Box>
-
         <Box
           sx={{
             display: "flex",
@@ -192,121 +253,116 @@ const Dashboard = forwardRef(
               }}
             >
               <Typography variant="h6" gutterBottom>
-                Alerts
+                Real-time Batch Monitor
               </Typography>
-              <Chip
-                label={`${sortedAlerts.length} Alerts`}
-                color="warning"
-                size="small"
-              />
-            </Box>
-
-            <Paper
-              id="alerts-panel"
-              elevation={3}
-              sx={{
-                flex: 1,
-                p: 2,
-                minHeight: 400,
-                maxHeight: 700,
-                overflowY: "auto",
-              }}
-            >
-              <Box
-                sx={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  mb: 2,
-                }}
-              >
-                <Typography variant="h6" gutterBottom>
-                  Batches
-                </Typography>
+              <Box sx={{ display: "flex", gap: 1 }}>
                 <Chip
-                  label={`${batches?.length || 0} Batches`}
+                  label={`${
+                    sortedBatches.filter((b) => b.is_attack).length
+                  } Attacks`}
+                  color="error"
+                  size="small"
+                />
+                <Chip
+                  label={`${sortedBatches.length} Batches`}
                   color="primary"
                   size="small"
                 />
               </Box>
+            </Box>
 
-              {batches && batches.length > 0 ? (
-                batches.map((batch, index) => {
-                  const isAttack = batch.is_attack === true;
-
-                  return (
-                    <Paper
-                      key={batch._id?.$oid || batch.id || index}
+            {sortedBatches.length > 0 ? (
+              sortedBatches.map((batch, index) => (
+                <Paper
+                  key={batch._id?.$oid || batch.batch_name || index}
+                  sx={{
+                    p: 2,
+                    mb: 1.5,
+                    border: "1px solid",
+                    borderColor: batch.is_attack
+                      ? "error.light"
+                      : "success.light",
+                    transition: "all 0.3s ease",
+                    "&:hover": {
+                      transform: "translateY(-2px)",
+                      boxShadow: 3,
+                    },
+                  }}
+                >
+                  <Box
+                    sx={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "flex-start",
+                    }}
+                  >
+                    <Typography
+                      variant="h6"
                       sx={{
-                        p: 2,
-                        mb: 1.5,
-                        border: "1px solid",
-                        borderColor: isAttack ? "error.light" : "success.light",
-                        transition: "all 0.3s ease",
-                        "&:hover": {
-                          transform: "translateY(-2px)",
-                          boxShadow: 3,
-                        },
+                        color: batch.is_attack ? "error.dark" : "success.dark",
+                        display: "flex",
+                        alignItems: "center",
                       }}
                     >
-                      <Box
-                        sx={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "flex-start",
-                        }}
-                      >
-                        <Typography
-                          variant="h6"
-                          sx={{
-                            color: isAttack ? "error.main" : "success.main",
-                            display: "flex",
-                            alignItems: "center",
-                          }}
-                        >
-                          {isAttack ? "⚠️ Alert" : "✅ Benign"} –{" "}
-                          {batch.name || batch._id?.$oid || "Unnamed"}
-                        </Typography>
-                        <Chip
-                          label={isAttack ? "Attack" : "Normal"}
-                          color={isAttack ? "error" : "success"}
-                          size="small"
-                        />
-                      </Box>
+                      {batch.is_attack ? "🚨" : "✅"} Batch {batch.batch_name}
+                    </Typography>
+                    <Chip
+                      label={`${batch.total_packets} packets`}
+                      color={batch.is_attack ? "error" : "success"}
+                      size="small"
+                      sx={{ ml: 1 }}
+                    />
+                  </Box>
 
-                      <Typography
-                        variant="body2"
-                        sx={{ mt: 1, color: "text.secondary" }}
-                      >
-                        {batch.createdAt
-                          ? new Date(
-                              batch.createdAt?.$date || batch.createdAt
-                            ).toLocaleString()
-                          : "No timestamp"}
-                      </Typography>
+                  {/* <Box
+                    sx={{ mt: 1, display: "flex", gap: 2, flexWrap: "wrap" }}
+                  >
+                    <Typography variant="body2" color="text.secondary">
+                      📅{" "}
+                      {new Date(
+                        batch.created_at?.$date || batch.created_at
+                      ).toLocaleString()}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      📊 TCP: {batch.protocol_distribution?.TCP || 0}, UDP:{" "}
+                      {batch.protocol_distribution?.UDP || 0}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      💾 {Math.round(batch.total_bytes / 1024)} KB
+                    </Typography>
+                  </Box> */}
 
-                      <Button
-                        variant="contained"
-                        color={isAttack ? "error" : "success"}
-                        size="small"
-                        sx={{ mt: 2 }}
-                        onClick={() => {
-                          const batchId = batch._id?.$oid || batch.id;
-                          navigate(`/batches/${batchId}`);
-                        }}
-                        endIcon={<ArrowForward />}
-                      >
-                        View Batch Details
-                      </Button>
-                    </Paper>
-                  );
-                })
-              ) : (
-                <Alert severity="info" sx={{ mt: 2 }}>
-                  No batch found.
-                </Alert>
-              )}
-            </Paper>
+                  <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
+                    <Button
+                      variant="contained"
+                      color={batch.is_attack ? "error" : "success"}
+                      size="small"
+                      onClick={() => {
+                        const batchId = batch._id?.$oid;
+                        navigate(`/batches/${batchId}`);
+                      }}
+                      endIcon={<ArrowForward />}
+                    >
+                      View Details
+                    </Button>
+                    {/* <Button
+                      variant="outlined"
+                      color={batch.is_attack ? "error" : "success"}
+                      size="small"
+                      href={getDownloadPcapUrl(batch._id?.$oid)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Download PCAP
+                    </Button> */}
+                  </Box>
+                </Paper>
+              ))
+            ) : (
+              <Alert severity="info" sx={{ mt: 2 }}>
+                No batches captured yet.
+              </Alert>
+            )}
           </Paper>
 
           <Paper
@@ -385,52 +441,20 @@ const Dashboard = forwardRef(
           </Paper>
         </Box>
 
-        <Dialog
-          open={dialogOpen}
-          onClose={() => setDialogOpen(false)}
-          maxWidth="md"
-          fullWidth
+        <Snackbar
+          open={showAlert}
+          autoHideDuration={5000}
+          onClose={() => setShowAlert(false)}
+          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         >
-          <DialogTitle>Gói tin liên quan đến cảnh báo</DialogTitle>
-          <DialogContent>
-            {alertPackets.length > 0 ? (
-              <PacketTable packets={alertPackets} />
-            ) : (
-              <Alert severity="info">
-                Không có gói tin liên kết với alert này.
-              </Alert>
-            )}
-          </DialogContent>
-        </Dialog>
-
-        {/* Dialog popup thay Snackbar */}
-        <Dialog
-          open={alertDialogOpen}
-          onClose={() => setAlertDialogOpen(false)}
-          maxWidth="sm"
-          fullWidth
-        >
-          <DialogTitle>🚨 WARNING</DialogTitle>
-          <DialogContent>
-            <Typography sx={{ mb: 2 }}>{snackbarMessage}</Typography>
-            <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 1 }}>
-              <Button onClick={() => setAlertDialogOpen(false)}>Close</Button>
-              <Button
-                variant="contained"
-                color="warning"
-                onClick={() => {
-                  const alertId = recentAlert?._id?.$oid || recentAlert?.id;
-                  if (alertId) {
-                    navigate(`/alerts/${alertId}`);
-                    setAlertDialogOpen(false);
-                  }
-                }}
-              >
-                More details
-              </Button>
-            </Box>
-          </DialogContent>
-        </Dialog>
+          <Alert
+            onClose={() => setShowAlert(false)}
+            severity="error"
+            sx={{ width: "100%" }}
+          >
+            {alertMessage}
+          </Alert>
+        </Snackbar>
       </Box>
     );
   }

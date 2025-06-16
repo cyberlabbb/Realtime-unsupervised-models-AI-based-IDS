@@ -10,7 +10,7 @@ import CssBaseline from "@mui/material/CssBaseline";
 // Tùy chọn dark/light theme nếu cần
 const theme = createTheme({
   palette: {
-    mode: "dark", // Đổi thành "dark" nếu muốn
+    mode: "light", // Đổi thành "dark" nếu muốn
   },
 });
 

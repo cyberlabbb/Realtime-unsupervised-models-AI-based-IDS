@@ -12,12 +12,15 @@ import {
   TableRow,
   CircularProgress,
   Alert,
+  TextField,
 } from "@mui/material";
 import {
   getBatchDetail,
   getDownloadCsvUrl,
   getDownloadPcapUrl,
   getCsvData,
+  deleteBatch,
+  updateBatch,
 } from "../services/api";
 import { formatVNDateTime } from "../utils/dateTime";
 
@@ -28,45 +31,84 @@ const BatchDetailPage = () => {
   const [columns, setColumns] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-
-  const csvHeaders = columns.map((col) => ({ label: col, key: col }));
+  const [note, setNote] = useState("");
+  const [batchMeta, setBatchMeta] = useState(null);
 
   useEffect(() => {
     const fetchBatchData = async () => {
       try {
-        const batch = await getBatchDetail(id);
-        if (!batch) throw new Error("No batch data received");
+        setLoading(true);
+        setError(null);
 
-        const csvResult = await getCsvData(id);
-        console.log("📦 Full CSV result:", csvResult);
+        // Get batch details
+        const response = await getBatchDetail(id);
+        if (!response || !response.batch) {
+          throw new Error("Batch not found");
+        }
 
-        setColumns(csvResult?.columns ?? []);
-        setRows(csvResult?.rows ?? []);
+        const batchData = response.batch;
+        setBatchMeta(batchData);
+        setNote(batchData?.note || "");
+
+        // Only try to get CSV data if we have a csv_file_path
+        if (batchData.csv_file_path) {
+          try {
+            const csvResult = await getCsvData(id);
+            console.log("CSV data loaded:", csvResult);
+            console.log("📦 Full CSV result:", csvResult);
+            console.log("🧪 Type:", typeof csvResult);
+            console.log("📑 Keys:", Object.keys(csvResult));
+
+            setColumns(csvResult?.columns ?? []);
+            setRows(csvResult?.rows ?? []);
+
+            console.log("Columns:", csvResult?.columns);
+            console.log("Rows:", csvResult?.rows);
+          } catch (csvError) {
+            console.warn("CSV data not available:", csvError);
+            // Don't fail completely if CSV isn't available
+            setColumns([]);
+            setRows([]);
+          }
+        }
       } catch (err) {
         console.error("Failed to load batch data:", err);
-        setError("Không thể tải dữ liệu batch.");
+        setError(err.message || "Could not load batch data");
       } finally {
         setLoading(false);
       }
     };
 
-    fetchBatchData();
+    if (id) {
+      fetchBatchData();
+    }
   }, [id]);
 
-  const formatTimestamp = (row) => {
-    if (row.Timestamp) {
-      return formatVNDateTime(row.Timestamp);
+
+  const handleDelete = async () => {
+    try {
+      await deleteBatch(id);
+      navigate("/dashboard");
+    } catch (err) {
+      console.error("Delete failed:", err);
     }
-    return row.Timestamp || "";
+  };
+
+  const handleUpdate = async () => {
+    try {
+      await updateBatch(id, { note });
+      alert("Cập nhật ghi chú thành công!");
+    } catch (err) {
+      console.error("Update failed:", err);
+    }
   };
 
   return (
-    <Box>
-      <Box sx={{ mb: 2, display: "flex", flexWrap: "wrap", gap: 2 }}>
+    <Box sx={{ mt: 4, mb: 2, ml:3, mr: 4,  display: "flex", flexWrap: "wrap", gap: 2 }}>
+      <Box sx={{ mt: 4, mb: 2, display: "flex", flexWrap: "wrap", gap: 2 }}>
         <Button variant="outlined" onClick={() => navigate("/dashboard")}>
           🔙 Trở về Dashboard
         </Button>
-
         <Button
           variant="contained"
           color="primary"
@@ -75,7 +117,6 @@ const BatchDetailPage = () => {
         >
           📄 Tải CSV
         </Button>
-
         <Button
           variant="contained"
           color="secondary"
@@ -84,7 +125,25 @@ const BatchDetailPage = () => {
         >
           🗂️ Tải PCAP
         </Button>
+        {/* <Button variant="contained" color="error" onClick={handleDelete}>
+          🗑 Xoá Batch
+        </Button> */}
       </Box>
+
+      {/* <Paper sx={{ p: 2, mb: 2 }}>
+        <TextField
+          label="Ghi chú / Nhãn đánh giá"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          multiline
+          fullWidth
+          rows={2}
+          sx={{ mb: 1 }}
+        />
+        <Button variant="outlined" onClick={handleUpdate}>
+          💾 Lưu cập nhật
+        </Button>
+      </Paper> */}
 
       {loading ? (
         <CircularProgress />

@@ -22,6 +22,11 @@ from bson import ObjectId, json_util
 import shutil
 from datetime import datetime
 import pytz
+import shutil
+from pathlib import Path
+import pytz
+from datetime import datetime
+from model_state import get_model  # thay thế biến toàn cục
 
 # logging.basicConfig(
 #     level=logging.WARNING,
@@ -52,19 +57,27 @@ OUTPUT_DIR = BASE_DIR / "pcap_splits"
 CSV_OUTPUT_DIR = BASE_DIR / "csv_cicflowmeter"
 CICFLOWMETER_DIR = BASE_DIR / "CICFlowMeter-4.0" / "bin"
 CFM_PATH = CICFLOWMETER_DIR / "cfm.bat"
-ALERT_DIR = BASE_DIR / "alerts"
+BATCH_DIR = BASE_DIR / "batches"
+BATCH_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR = BASE_DIR / "Model"
 CHUNK_SIZE = 5000
 
-# Create required directories
-for directory in [OUTPUT_DIR, CSV_OUTPUT_DIR, ALERT_DIR, CICFLOWMETER_DIR, MODEL_DIR]:
+for directory in [OUTPUT_DIR, CSV_OUTPUT_DIR, BATCH_DIR, CICFLOWMETER_DIR, MODEL_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
-# Load ML models
+
 custom_objects = {"mse": MeanSquaredError()}
 try:
-    MODEL = load_model(MODEL_DIR / "autoencoder.h5", compile=False)
+    AU_MODEL = load_model(MODEL_DIR / "autoencoder.h5", compile=False)
+    KMEANS_MODEL = joblib.load(MODEL_DIR / "kmeans_model.pkl")
+    SVM_MODEL = joblib.load(MODEL_DIR / "svm_model.pkl")
+
+    ANOMALY_DATA = np.load(MODEL_DIR / "autoencoder_train_info.npz")
+    AUTOENCODER_THRESHOLD = ANOMALY_DATA["threshold"].item()
+
     SCALER_AU = joblib.load(MODEL_DIR / "scaler_autoencoder.pkl")
+    SCALER_KMEANS = joblib.load(MODEL_DIR / "scaler_kmeans.pkl")
+    SCALER_SVM = joblib.load(MODEL_DIR / "scaler_svm.pkl")
     logger.info("ML models loaded successfully")
 except Exception as e:
     logger.error(f"Failed to load ML models: {e}")
@@ -91,6 +104,7 @@ file_index = 0
 all_predictions = []
 executor = ThreadPoolExecutor(max_workers=4)
 lock = threading.Lock()
+packet_buffer_size = 1000
 sniff_thread = None
 sniff_control = threading.Event()
 is_sniffing = False
@@ -134,29 +148,11 @@ def aggregate_features(csv_file: Path) -> pd.DataFrame:
             logger.warning("Empty CSV file: %s", csv_file)
             return None
 
-        feature_config = {
-            "Flow Duration": ["mean"],
-            "Fwd IAT Tot": ["std"],
-            "Fwd IAT Max": ["std"],
-            "Fwd IAT Std": ["mean", "std"],
-            "Bwd IAT Max": ["mean"],
-        }
+        model = get_model()
+        logger.info(f"Aggregating features for model: {model}")
 
-        # Check for missing columns
-        missing = [col for col in feature_config if col not in data.columns]
-        if missing:
-            logger.warning("Missing columns: %s", missing)
-            return None
-
-        # Perform aggregation
-        aggregated = {}
-        for feature, aggs in feature_config.items():
-            for agg_func in aggs:
-                col_name = f"{feature}_{agg_func}"
-                aggregated[col_name] = [data[feature].agg(agg_func)]
-
-        return pd.DataFrame(aggregated).reindex(
-            columns=[
+        if model == "autoencoder":
+            selected_cols = [
                 "Flow Duration_mean",
                 "Fwd IAT Tot_std",
                 "Fwd IAT Max_std",
@@ -164,13 +160,71 @@ def aggregate_features(csv_file: Path) -> pd.DataFrame:
                 "Fwd IAT Std_std",
                 "Bwd IAT Max_mean",
             ]
-        )
+            config = {
+                "Flow Duration": ["mean"],
+                "Fwd IAT Tot": ["std"],
+                "Fwd IAT Max": ["std"],
+                "Fwd IAT Std": ["mean", "std"],
+                "Bwd IAT Max": ["mean"],
+            }
+        elif model == "kmeans":
+            selected_cols = [
+                "Flow Duration_mean",
+                "Fwd IAT Tot_std",
+                "Fwd IAT Max_std",
+                "Fwd IAT Std_mean",
+                "Fwd IAT Std_std",
+                "Bwd IAT Max_mean",
+            ]
+            config = {
+                "Flow Duration": ["mean"],
+                "Fwd IAT Tot": ["std"],
+                "Fwd IAT Max": ["std"],
+                "Fwd IAT Std": ["mean", "std"],
+                "Bwd IAT Max": ["mean"],
+            }
+        elif model == "svm":
+            selected_cols = [
+                "Flow Duration_mean",
+                "Fwd IAT Tot_mean",
+                "Fwd IAT Tot_std",
+                "Bwd IAT Max_mean",
+                "Bwd IAT Std_mean",
+            ]
+            config = {
+                "Flow Duration": ["mean"],
+                "Fwd IAT Tot": ["mean", "std"],
+                "Bwd IAT Max": ["mean"],
+                "Bwd IAT Std": ["mean"],
+            }
+        else:
+            logger.error(f"Unknown model: {model}")
+            return None
+
+        # Check for missing columns
+        missing = [col for col in config if col not in data.columns]
+        if missing:
+            logger.warning("Missing columns in CSV: %s", missing)
+            return None
+
+        # Aggregation
+        aggregated = {}
+        for col, aggs in config.items():
+            for agg in aggs:
+                key = f"{col}_{agg}"
+                aggregated[key] = [data[col].agg(agg)]
+
+        df = pd.DataFrame(aggregated).reindex(columns=selected_cols)
+        df = df.astype(np.float32)
+        logger.debug(f"Aggregated features: {df}")
+        return df
+
     except Exception as e:
         logger.error("Feature aggregation failed: %s", e)
         return None
 
 
-def detect_anomalies(features: pd.DataFrame) -> np.ndarray:
+def detect_anomalies_AU(features: pd.DataFrame) -> np.ndarray:
     try:
         if features is None or features.empty:
             return np.array([])
@@ -178,12 +232,65 @@ def detect_anomalies(features: pd.DataFrame) -> np.ndarray:
         features = features.astype("float32")
         features_scaled = SCALER_AU.transform(features)
 
-        reconstructions = MODEL.predict(features_scaled)
-        test_loss = tf.keras.losses.mae(reconstructions, features_scaled).numpy()
-        print("Reconstruction loss:", test_loss)
-        threshold = 0.13187411615033016
-        predictions = (test_loss > threshold).astype(int)
-        logger.debug("Anomaly predictions: %s", predictions)
+        def predict(model, data, threshold):
+            reconstructions = model.predict(data)
+            loss = tf.keras.losses.mae(reconstructions, data)
+            return (loss.numpy() < threshold).astype(int)
+
+        preds = predict(AU_MODEL, features_scaled, AUTOENCODER_THRESHOLD)
+        logger.debug("Anomaly predictions: %s", preds.tolist())
+        return preds
+
+    except Exception as e:
+        logger.error("Anomaly detection failed: %s", e)
+        return np.array([])
+
+
+def detect_anomalies_KMEANS(features: pd.DataFrame) -> np.ndarray:
+    """Detect anomalies using KMeans model"""
+    try:
+        if features is None or features.empty:
+            return np.array([])
+
+        expected_columns = [
+            "Flow Duration_mean",
+            "Fwd IAT Tot_std",
+            "Fwd IAT Max_std",
+            "Fwd IAT Std_mean",
+            "Fwd IAT Std_std",
+            "Bwd IAT Max_mean",
+        ]
+
+        features = features[expected_columns]
+        features.replace([np.inf, -np.inf], np.nan, inplace=True)
+        features.fillna(0, inplace=True)
+
+        features_scaled = SCALER_KMEANS.transform(features)
+        features_scaled_df = pd.DataFrame(features_scaled, columns=features.columns)
+
+        # 👇 Predict then map 0 → 1 (anomaly), 1 → 0 (benign)
+        raw_predictions = KMEANS_MODEL.predict(features_scaled_df)
+        predictions = np.array([1 if pred == 0 else 0 for pred in raw_predictions])
+
+        logger.debug(f"Predictions: {predictions}")
+        return predictions
+
+    except Exception as e:
+        logger.error(f"KMeans detection failed: {str(e)}")
+        return np.array([])
+
+
+def detect_anomalies_SVM(features: pd.DataFrame) -> np.ndarray:
+    try:
+        if features is None or features.empty:
+            return np.array([])
+
+        logger.error(f"Features shape: {features.shape}")
+        logger.error(f"Features columns: {features.columns}")
+        logger.error(f"Features dtypes: {features.dtypes}")
+
+        features = features.astype(np.float32)
+        predictions = SVM_MODEL.predict(features)
         return predictions
     except Exception as e:
         logger.error("Anomaly detection failed: %s", e)
@@ -254,70 +361,125 @@ def analyze_packet_stats(packets):
     return stats
 
 
-def save_batch_to_db(pcap_path, packets, index, is_attack=False):
-    """Save batch to MongoDB"""
+def save_batch_to_db(pcap_path, packets, index, is_attack=False, csv_path: Path = None):
+    """Save batch to MongoDB with proper file handling"""
     try:
         stats = analyze_packet_stats(packets)
+        vietnam_tz = pytz.timezone("Asia/Ho_Chi_Minh")
+        current_time = datetime.now(vietnam_tz)
+
+        timestamp_str = current_time.strftime("%Y%m%d_%H%M%S")
+        batch_name = f"batch_{timestamp_str}"
+        batch_dir = BATCH_DIR / batch_name
+        batch_dir.mkdir(parents=True, exist_ok=True)
+
+        pcap_file = batch_dir / f"{batch_name}.pcap"
+        wrpcap(str(pcap_file), packets)
+
+        batch_csv = None
+        if csv_path and csv_path.exists():
+            batch_csv = batch_dir / f"{batch_name}.csv"
+            try:
+                shutil.copy2(str(csv_path), str(batch_csv))
+            except Exception as e:
+                logger.warning(f"Could not copy CSV file: {e}")
+
         batch_doc = {
-            "batch_name": f"batch_{index}",
-            "created_at": datetime.now(),
-            "pcap_file_path": str(pcap_path),
+            "batch_name": batch_name,
+            "created_at": current_time,
+            "pcap_file_path": str(pcap_file),
+            "csv_file_path": str(batch_csv) if batch_csv else None,
             **stats,
-            "note": f"Processed at {datetime.now().isoformat()}",
-            "is_attack": is_attack,  # ➕ thêm dòng này
+            "note": f"Processed at {current_time.isoformat()}",
+            "is_attack": is_attack,
         }
+
         result = batches_collection.insert_one(batch_doc)
-        logger.info(f"Saved batch {index} to MongoDB")
-        return result.inserted_id
+        batch_id = result.inserted_id
+
+        socket_batch = {
+            **batch_doc,
+            "_id": {"$oid": str(batch_id)},
+            "created_at": batch_doc["created_at"].isoformat(),
+            "start_time": (
+                batch_doc["start_time"].isoformat()
+                if batch_doc.get("start_time")
+                else None
+            ),
+            "end_time": (
+                batch_doc["end_time"].isoformat() if batch_doc.get("end_time") else None
+            ),
+        }
+
+        socketio.emit("new_batch", socket_batch)
+
+        if is_attack:
+            alert_data = {
+                "batch_id": str(batch_id),
+                "message": f"Attack detected in batch {batch_name}",
+                "severity": "high",
+                "timestamp": current_time.isoformat(),
+            }
+            socketio.emit("intrusion_alert", alert_data)
+
+        return batch_id
+
     except Exception as e:
         logger.error(f"Failed to save batch {index}: {e}")
         return None
 
+
 def process_packet_batch(buffer: list, index: int):
-    """Process packet batch"""
+    """Process packet batch with improved file handling"""
+    model = get_model()
+
     pcap_path = None
     csv_path = None
 
     try:
-        pcap_path = OUTPUT_DIR / f"capture_{index}.pcap"
+        pcap_path = OUTPUT_DIR / f"temp_capture_{index}.pcap"
         wrpcap(str(pcap_path), buffer)
-        logger.info("Saved PCAP: %s", pcap_path)
-
-        # Tạm lưu batch là is_attack=False, sẽ cập nhật lại sau nếu phát hiện
-        batch_id = save_batch_to_db(pcap_path, buffer, index, is_attack=False)
-        if not batch_id:
-            logger.warning("Failed to save batch info")
-
         csv_path = extract_features_with_cicflowmeter(pcap_path, CSV_OUTPUT_DIR)
-        if not csv_path:
-            return
 
-        try:
-            df = pd.read_csv(csv_path)
-            if not df.empty:
-                flow_dicts = df.replace({np.nan: None}).to_dict(orient="records")
-                for flow in flow_dicts:
-                    flow["batch_index"] = index
-                flows_collection = db["flows"]
-                flows_collection.insert_many(flow_dicts)
-                logger.info(f"Inserted {len(flow_dicts)} flows for batch {index}")
-        except Exception as e:
-            logger.error(f"Failed to insert flows for batch {index}: {e}")
+        features = aggregate_features(csv_path) if csv_path else None
+        logger.info(f"Using model: {model} for predictions")
 
-        features = aggregate_features(csv_path)
-        if features is None:
-            return
+        if model == "autoencoder":
+            predictions = (
+                detect_anomalies_AU(features) if features is not None else np.array([])
+            )
+        elif model == "kmeans":
+            predictions = (
+                detect_anomalies_KMEANS(features)
+                if features is not None
+                else np.array([])
+            )
+        elif model == "svm":
+            predictions = (
+                detect_anomalies_SVM(features) if features is not None else np.array([])
+            )
+        else:
+            logger.error(f"Invalid model selected: {model}")
+            predictions = np.array([])
 
-        predictions = detect_anomalies(features)
-        logger.info("Predictions: %s", predictions)
+        logger.info(f"Using model: {model} for predictions")
 
         is_attack = bool(predictions.any())
 
-        if batch_id:
-            batches_collection.update_one(
-            {"_id": batch_id},
-            {"$set": {"is_attack": is_attack}}  \
-        )
+        batch_id = save_batch_to_db(pcap_path, buffer, index, is_attack, csv_path)
+
+        if features is not None:
+            try:
+                df = pd.read_csv(csv_path)
+                if not df.empty:
+                    flow_dicts = df.replace({np.nan: None}).to_dict(orient="records")
+                    for flow in flow_dicts:
+                        flow["batch_index"] = index
+                    flows_collection = db["flows"]
+                    flows_collection.insert_many(flow_dicts)
+                    logger.info(f"Inserted {len(flow_dicts)} flows for batch {index}")
+            except Exception as e:
+                logger.error(f"Failed to insert flows for batch {index}: {e}")
 
         batch_result = {
             "batch": index,
@@ -327,103 +489,16 @@ def process_packet_batch(buffer: list, index: int):
         }
         all_predictions.append(batch_result)
 
-        if is_attack:
-            handle_alert(predictions, buffer, index, batch_id, csv_path)
-
     except Exception as e:
         logger.error("Error processing batch %d: %s", index, e)
     finally:
-        for f in [pcap_path, csv_path]:
-            if f and f.exists():
+
+        for temp_file in [pcap_path, csv_path]:
+            if temp_file and temp_file.exists():
                 try:
-                    f.unlink()
+                    temp_file.unlink()
                 except Exception as e:
-                    logger.warning("Could not delete %s: %s", f, e)
-
-
-def handle_alert(
-    predictions: np.ndarray,
-    packets: list,
-    index: int,
-    batch_id: str = None,
-    csv_path: Path = None,
-):
-    """Handle intrusion alert"""
-    alert_count = np.sum(predictions)
-    logger.warning("ALERT: Detected %d anomalies in batch %d", alert_count, index)
-
-    # Create alert directory and save files
-    alert_dir = ALERT_DIR / f"alert_{index}"
-    alert_dir.mkdir(parents=True, exist_ok=True)
-    alert_pcap = alert_dir / f"alert_{index}.pcap"
-    wrpcap(str(alert_pcap), packets)
-    alert_csv = None
-
-    # Handle CSV file if exists
-    if csv_path and csv_path.exists():
-        alert_csv = alert_dir / csv_path.name
-        try:
-            if alert_csv.exists():
-                alert_csv.unlink()
-            shutil.move(str(csv_path), str(alert_csv))
-        except Exception as e:
-            logger.warning(f"Could not move CSV file: {e}")
-
-    # Get Vietnam time
-    vietnam_tz = pytz.timezone("Asia/Ho_Chi_Minh")
-    vn_time = datetime.now(vietnam_tz)
-
-    # Format timestamp for MongoDB
-    mongo_timestamp = vn_time.astimezone(pytz.UTC)  # Convert to UTC for MongoDB
-
-    # Create alert document
-    alert_doc = {
-        "timestamp": mongo_timestamp,  # Store as UTC in MongoDB
-        "timestamp_str": vn_time.strftime(
-            "%Y-%m-%d %H:%M:%S %z"
-        ),  # Human readable VN time
-        "batch_id": str(batch_id) if batch_id else None,
-        "batch_index": index,
-        "alert_count": int(alert_count),
-        "pcap_path": str(alert_pcap),
-        "message": f"Detected {alert_count} anomalies",
-        "severity": "high",
-        "processed": False,
-        "csv_path": str(alert_csv) if alert_csv else None,
-    }
-
-    try:
-        # Save to MongoDB
-        result = alerts_collection.insert_one(alert_doc)
-        alert_id = str(result.inserted_id)
-        logger.info(f"Saved alert to MongoDB with ID: {alert_id}")
-
-        # Emit socket event with Vietnam time
-        socketio.emit(
-            "intrusion_alert",
-            {
-                "id": alert_id,
-                "timestamp": vn_time.isoformat(),  # ISO format with timezone info
-                "timestamp_str": alert_doc["timestamp_str"],  # Human readable time
-                "file_path": str(alert_pcap),
-                "message": f"Detected {alert_count} anomalies",
-                "severity": "high",
-                "batch_id": str(batch_id) if batch_id else None,
-                "batch_index": index,
-                "alert_count": int(alert_count),
-                "progress": {
-                    "current": index,
-                    "total": file_index,
-                    "percentage": round(
-                        (index / file_index * 100) if file_index > 0 else 0, 2
-                    ),
-                },
-            },
-        )
-        logger.debug(f"Emitted alert notification for batch {index}")
-    except Exception as e:
-        logger.error(f"Failed to handle alert: {str(e)}")
-        raise
+                    logger.warning(f"Could not delete temporary file {temp_file}: {e}")
 
 
 def handle_packet(packet):
@@ -433,7 +508,6 @@ def handle_packet(packet):
         packet_data = None
         try:
             if packet.haslayer(IP):
-                # Lấy timestamp hiện tại theo giờ Việt Nam
                 vietnam_tz = pytz.timezone("Asia/Ho_Chi_Minh")
                 vn_time = datetime.now(vietnam_tz)
 
@@ -445,14 +519,12 @@ def handle_packet(packet):
                     "length": len(packet),
                     "info": packet.summary(),
                 }
-                # Emit only once if packet data is valid
+               
                 if packet_data:
                     socketio.emit("new_packet", packet_data)
                     logger.info(f"Emitted packet: {packet_data}")
         except Exception as e:
             logger.error(f"Error emitting packet: {e}")
-
-        # Always add to buffer regardless of emit success
         packet_buffer.append(packet)
         packet_count += 1
 
