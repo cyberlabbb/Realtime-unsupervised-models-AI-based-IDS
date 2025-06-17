@@ -11,5 +11,5 @@ npm start
 ### 2️⃣ Open another terminal and start the Backend:
 
 ```bash
-python server2.py
+python server_v2.py
 ```
