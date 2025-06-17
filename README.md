@@ -6,8 +6,10 @@
 cd Frontend
 npm install
 npm start
+```
 
 ### 2️⃣ Open another terminal and start the Backend:
 
 ```bash
 python server2.py
+```
