@@ -26,8 +26,7 @@ import {
 } from "recharts";
 import BatchTable from "../components/BatchTable";
 import PacketTable from "../components/PacketTable";
-import { protocolMap } from "./../document/protocolMap";
-import { formatVNDateTime } from "../utils/dateTime";
+import { protocolMap } from "../document/protocolMap";
 
 const Statistics = ({ packets = [] }) => {
   const [summary, setSummary] = useState(null);
@@ -61,7 +60,7 @@ const Statistics = ({ packets = [] }) => {
   }, [fetchBatches, refreshTrigger]);
 
   useEffect(() => {
-    fetchSummary(); // initial fetch
+    fetchSummary();
     const interval = setInterval(fetchSummary, 10000);
     return () => clearInterval(interval);
   }, [fetchSummary]);
@@ -83,42 +82,6 @@ const Statistics = ({ packets = [] }) => {
     }
   };
 
-  const renderPieChart = (title, data) => (
-    <Paper elevation={3} sx={{ p: 2, width: "100%", height: 400 }}>
-      <Typography variant="subtitle1" gutterBottom>
-        {title}
-      </Typography>
-      <ResponsiveContainer width="100%" height={300}>
-        <PieChart>
-          <Pie
-            data={data}
-            dataKey="value"
-            nameKey="name"
-            outerRadius={100}
-            label
-          >
-            {data.map((entry, index) => (
-              <Cell
-                key={`cell-${index}`}
-                fill={
-                  [
-                    "#8884d8",
-                    "#82ca9d",
-                    "#ffc658",
-                    "#ff8042",
-                    "#a4de6c",
-                    "#d0ed57",
-                  ][index % 6]
-                }
-              />
-            ))}
-          </Pie>
-          <Tooltip />
-        </PieChart>
-      </ResponsiveContainer>
-    </Paper>
-  );
-
   const mapProtocolsToNames = (protocolData) =>
     (protocolData || []).map((item) => ({
       name: protocolMap[item.name] || `Unknown (${item.name})`,
@@ -126,13 +89,40 @@ const Statistics = ({ packets = [] }) => {
     }));
 
   return (
-    <Box sx={{ p: 2, height: "100vh", overflow: "auto" }}>
-      <Typography variant="h5" gutterBottom>
-        Network Statistics
+    <Box sx={{ p: 2, minHeight: "100vh", overflow: "auto" }}>
+      <Typography
+        variant="h4"
+        sx={{
+          fontWeight: "bold",
+          background: "linear-gradient(45deg, #00bcd4, #ff4081)",
+          WebkitBackgroundClip: "text",
+          WebkitTextFillColor: "transparent",
+        }}
+      >
+        Statistics
       </Typography>
-      <Divider sx={{ mb: 2 }} />
 
-      <FormControl sx={{ mb: 2, minWidth: 200 }} size="small">
+      <Divider sx={{ mb: 2, borderColor: "rgba(0,0,0,0.2)" }} />
+
+      <FormControl
+        sx={{
+          mb: 2,
+          minWidth: 200,
+          bgcolor: "rgba(255, 255, 255, 0.85)",
+          borderRadius: 2,
+          boxShadow: "0 4px 10px rgba(0,0,0,0.2)",
+          "& .MuiOutlinedInput-notchedOutline": {
+            borderColor: "transparent",
+          },
+          "&:hover .MuiOutlinedInput-notchedOutline": {
+            borderColor: "#00bcd4",
+          },
+          "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
+            borderColor: "#ff4081",
+          },
+        }}
+        size="small"
+      >
         <InputLabel id="time-range-label">Time Range</InputLabel>
         <Select
           labelId="time-range-label"
@@ -147,38 +137,116 @@ const Statistics = ({ packets = [] }) => {
       </FormControl>
 
       {!summary ? (
-        <Typography variant="body2">Loading summary data...</Typography>
+        <Typography variant="body2" color="text.secondary">
+          Loading summary data...
+        </Typography>
       ) : (
         <>
           <Stack direction="row" spacing={2} sx={{ mb: 2, flexWrap: "wrap" }}>
-            <Box sx={{ flex: "1 1 24%" }}>
-              {renderPieChart("Top Source IP", summary.top_source_ips || [])}
-            </Box>
-            <Box sx={{ flex: "1 1 24%" }}>
-              {renderPieChart(
-                "Top Destination Port",
-                summary.top_destination_ports || []
-              )}
-            </Box>
-            <Box sx={{ flex: "1 1 24%" }}>
-              {renderPieChart(
-                "Top Destination IP",
-                summary.top_destination_ips || []
-              )}
-            </Box>
-            <Box sx={{ flex: "1 1 24%" }}>
-              {renderPieChart(
-                "Top Protocols",
-                mapProtocolsToNames(summary.top_protocols)
-              )}
-            </Box>
+            {[
+              { title: "Top Source IP", data: summary.top_source_ips || [] },
+              {
+                title: "Top Destination Port",
+                data: summary.top_destination_ports || [],
+              },
+              {
+                title: "Top Destination IP",
+                data: summary.top_destination_ips || [],
+              },
+              {
+                title: "Top Protocols",
+                data: mapProtocolsToNames(summary.top_protocols),
+              },
+            ].map((item, index) => (
+              <Paper
+                key={index}
+                elevation={5}
+                sx={{
+                  p: 2,
+                  flex: "1 1 24%",
+                  minWidth: 300,
+                  borderRadius: 3,
+                  bgcolor: "white",
+                  color: "black",
+                }}
+              >
+                <Box
+                  sx={{
+                    background: "linear-gradient(90deg, #00bcd4, #ff4081)",
+                    color: "white",
+                    px: 2,
+                    py: 1,
+                    borderRadius: 2,
+                    mb: 1.5,
+                  }}
+                >
+                  <Typography variant="subtitle1" sx={{ fontWeight: "600" }}>
+                    {item.title}
+                  </Typography>
+                </Box>
+
+                <ResponsiveContainer width="100%" height={280}>
+                  <PieChart>
+                    <Pie
+                      data={item.data}
+                      dataKey="value"
+                      nameKey="name"
+                      outerRadius={100}
+                      label
+                    >
+                      {item.data.map((entry, i) => (
+                        <Cell
+                          key={`cell-${i}`}
+                          fill={
+                            [
+                              "#8884d8",
+                              "#82ca9d",
+                              "#ffc658",
+                              "#ff8042",
+                              "#a4de6c",
+                              "#d0ed57",
+                            ][i % 6]
+                          }
+                        />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      contentStyle={{ backgroundColor: "#333", color: "#fff" }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              </Paper>
+            ))}
           </Stack>
 
-          <Stack direction="row" spacing={2} sx={{ mb: 2 }}>
-            <Paper elevation={3} sx={{ p: 2, width: "40%", height: 420 }}>
-              <Typography variant="subtitle1" gutterBottom>
-                Traffic Over Time
-              </Typography>
+          <Stack direction="row" spacing={2} sx={{ mb: 2, flexWrap: "wrap" }}>
+            <Paper
+              elevation={5}
+              sx={{
+                p: 2,
+                flex: "1 1 40%",
+                minWidth: 400,
+                height: 420,
+                borderRadius: 3,
+                bgcolor: "white",
+                color: "black",
+              }}
+            >
+              <Box
+                sx={{
+                  background: "linear-gradient(90deg, #00bcd4, #ff4081)",
+                  color: "white",
+                  px: 2,
+                  py: 1,
+                  borderRadius: 2,
+                  mb: 1.5,
+                }}
+              >
+                <Typography variant="subtitle1" sx={{ fontWeight: "600" }}>
+                  Traffic Over Time
+                </Typography>
+              </Box>
+
               <ResponsiveContainer width="100%" height={300}>
                 <BarChart data={summary.traffic_over_time || []}>
                   <CartesianGrid strokeDasharray="3 3" />
@@ -191,32 +259,38 @@ const Statistics = ({ packets = [] }) => {
             </Paper>
 
             <Paper
-              elevation={3}
+              elevation={5}
               sx={{
-                flex: 1,
+                flex: "1 1 55%",
+                minWidth: 500,
                 height: 420,
+                borderRadius: 3,
                 display: "flex",
                 flexDirection: "column",
+                bgcolor: "white",
+                color: "black",
               }}
             >
-              <Tabs
-                value={tabIndex}
-                onChange={(e, newIndex) => setTabIndex(newIndex)}
-                variant="scrollable"
-                scrollButtons="auto"
+              <Box
+                sx={{
+                  background: "linear-gradient(90deg, #00bcd4, #ff4081)",
+                  color: "white",
+                  px: 2,
+                  py: 1,
+                  borderTopLeftRadius: "12px",
+                  borderTopRightRadius: "12px",
+                }}
               >
-                <Tab label="Traffic Batches" />
-                <Tab label="Live Packets" />
-              </Tabs>
+                <Typography variant="subtitle1" sx={{ fontWeight: "600" }}>
+                  Traffic Batches
+                </Typography>
+              </Box>
 
               <Box sx={{ flex: 1, overflowY: "auto", p: 2 }}>
-                {tabIndex === 0 && (
-                  <BatchTable
-                    batches={batchesData}
-                    onBatchDeleted={handleBatchDeleted}
-                  />
-                )}
-                {tabIndex === 1 && <PacketTable packets={packets} />}
+                <BatchTable
+                  batches={batchesData}
+                  onBatchDeleted={handleBatchDeleted}
+                />
               </Box>
             </Paper>
           </Stack>

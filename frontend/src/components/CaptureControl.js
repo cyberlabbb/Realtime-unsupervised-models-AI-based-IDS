@@ -1,10 +1,15 @@
 import React from "react";
 import { Chip, Button, Box, CircularProgress, Typography } from "@mui/material";
-import { PlayArrow, Stop, } from "@mui/icons-material";
+import { PlayArrow, Stop } from "@mui/icons-material";
 import axios from "axios";
 import { useCapture } from "../contexts/CaptureContext";
 import { getSocket } from "../services/socket";
-const CaptureControl = ({ currentModel }) => {
+
+const CaptureControl = ({
+  currentModel,
+  totalPacketCount,
+  setTotalPacketCount,
+}) => {
   const { isCapturing, setIsCapturing } = useCapture();
   const [loading, setLoading] = React.useState(false);
 
@@ -31,23 +36,27 @@ const CaptureControl = ({ currentModel }) => {
 
     setLoading(true);
     try {
-      const res = await axios.post("http://localhost:5000/api/capture/start");
+      await axios.post("http://localhost:5000/api/capture/start");
       setIsCapturing(true);
     } catch (error) {
       const errMsg = error.response?.data?.message || "Unknown error";
       console.error("Error starting capture:", errMsg);
 
       if (errMsg === "Capture already running") {
-        setIsCapturing(true); // Cập nhật UI đúng trạng thái
+        // Không alert, chỉ đồng bộ trạng thái
+        setIsCapturing(true);
+      } else {
+        // Có thể alert hoặc xử lý lỗi khác nếu muốn
+        setIsCapturing(false);
       }
     } finally {
       setLoading(false);
     }
   };
-  
 
   const handleStop = async () => {
     setLoading(true);
+    setTotalPacketCount(0); // Reset count khi stop
     try {
       await axios.post("http://localhost:5000/api/capture/stop");
       setIsCapturing(false);

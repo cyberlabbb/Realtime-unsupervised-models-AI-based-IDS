@@ -26,32 +26,21 @@ import shutil
 from pathlib import Path
 import pytz
 from datetime import datetime
-from model_state import get_model  # thay thế biến toàn cục
-
-# logging.basicConfig(
-#     level=logging.WARNING,
-#     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-#     handlers=[logging.StreamHandler(), logging.FileHandler("app.log")],
-# )
-# logger = logging.getLogger(__name__)
-
+from model_state import get_model
 from socket_instance import socketio, app
 
 
-# Update logging configuration
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout),  # Use stdout for Unicode support
-        logging.FileHandler("app.log", encoding="utf-8"),  # Specify UTF-8 encoding
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("app.log", encoding="utf-8"),
     ],
 )
 logger = logging.getLogger(__name__)
-# Environment setup
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-# Directory setup
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 BASE_DIR = Path(__file__).parent
 OUTPUT_DIR = BASE_DIR / "pcap_splits"
 CSV_OUTPUT_DIR = BASE_DIR / "csv_cicflowmeter"
@@ -70,7 +59,7 @@ custom_objects = {"mse": MeanSquaredError()}
 try:
     AU_MODEL = load_model(MODEL_DIR / "autoencoder.h5", compile=False)
     KMEANS_MODEL = joblib.load(MODEL_DIR / "kmeans_model.pkl")
-    SVM_MODEL = joblib.load(MODEL_DIR / "svm_model.pkl")
+    SVM_MODEL = joblib.load(MODEL_DIR / "ocsvm_model.joblib")
 
     ANOMALY_DATA = np.load(MODEL_DIR / "autoencoder_train_info.npz")
     AUTOENCODER_THRESHOLD = ANOMALY_DATA["threshold"].item()
@@ -78,15 +67,15 @@ try:
     SCALER_AU = joblib.load(MODEL_DIR / "scaler_autoencoder.pkl")
     SCALER_KMEANS = joblib.load(MODEL_DIR / "scaler_kmeans.pkl")
     SCALER_SVM = joblib.load(MODEL_DIR / "scaler_svm.pkl")
+
+    KMEANS_MAPPING = joblib.load(MODEL_DIR / "kmeans_label_mapping.pkl")
     logger.info("ML models loaded successfully")
 except Exception as e:
     logger.error(f"Failed to load ML models: {e}")
     raise
-
-# Load environment variables
 load_dotenv()
 
-# MongoDB setup
+
 try:
     client = MongoClient(os.environ.get("MONGO_URI"))
     db = client["network_monitor"]
@@ -97,17 +86,16 @@ except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {e}")
     raise
 
-# Global state
 packet_count = 0
 packet_buffer = []
 file_index = 0
 all_predictions = []
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=12)
 lock = threading.Lock()
-packet_buffer_size = 1000
 sniff_thread = None
 sniff_control = threading.Event()
 is_sniffing = False
+total_packet_count = 0
 
 
 def extract_features_with_cicflowmeter(pcap_path: Path, output_dir: Path) -> Path:
@@ -224,6 +212,54 @@ def aggregate_features(csv_file: Path) -> pd.DataFrame:
         return None
 
 
+def extract_basic_features(packets, model):
+    # Định nghĩa danh sách feature cho từng model
+    if model == "autoencoder" or model == "kmeans":
+        selected_cols = [
+            "Flow Duration_mean",
+            "Fwd IAT Tot_std",
+            "Fwd IAT Max_std",
+            "Fwd IAT Std_mean",
+            "Fwd IAT Std_std",
+            "Bwd IAT Max_mean",
+        ]
+    elif model == "svm":
+        selected_cols = [
+            "Flow Duration_mean",
+            "Fwd IAT Tot_mean",
+            "Fwd IAT Tot_std",
+            "Bwd IAT Max_mean",
+            "Bwd IAT Std_mean",
+        ]
+    else:
+        logger.error(f"Unknown model: {model}")
+        return None
+
+    # Tính toán các đặc trưng cơ bản
+    times = [float(pkt.time) for pkt in packets]
+    duration = max(times) - min(times) if len(times) > 1 else 0
+
+    lengths = [len(pkt) for pkt in packets]
+    mean_len = np.mean(lengths) if lengths else 0
+    std_len = np.std(lengths) if lengths else 0
+    max_len = np.max(lengths) if lengths else 0
+
+    # Tùy model, build dict feature phù hợp
+    feature_dict = {
+        "Flow Duration_mean": duration,
+        "Fwd IAT Tot_mean": mean_len,
+        "Fwd IAT Tot_std": std_len,
+        "Fwd IAT Max_std": max_len,
+        "Fwd IAT Std_mean": mean_len,
+        "Fwd IAT Std_std": std_len,
+        "Bwd IAT Max_mean": max_len,
+        "Bwd IAT Std_mean": std_len,
+    }
+
+    # Trả về dict chỉ chứa các feature cần thiết, đúng thứ tự
+    return {col: feature_dict.get(col, 0) for col in selected_cols}
+
+
 def detect_anomalies_AU(features: pd.DataFrame) -> np.ndarray:
     try:
         if features is None or features.empty:
@@ -245,9 +281,8 @@ def detect_anomalies_AU(features: pd.DataFrame) -> np.ndarray:
         logger.error("Anomaly detection failed: %s", e)
         return np.array([])
 
-
 def detect_anomalies_KMEANS(features: pd.DataFrame) -> np.ndarray:
-    """Detect anomalies using KMeans model"""
+    """Detect anomalies using KMeans model with proper cluster-to-label mapping."""
     try:
         if features is None or features.empty:
             return np.array([])
@@ -266,13 +301,12 @@ def detect_anomalies_KMEANS(features: pd.DataFrame) -> np.ndarray:
         features.fillna(0, inplace=True)
 
         features_scaled = SCALER_KMEANS.transform(features)
-        features_scaled_df = pd.DataFrame(features_scaled, columns=features.columns)
 
-        # 👇 Predict then map 0 → 1 (anomaly), 1 → 0 (benign)
-        raw_predictions = KMEANS_MODEL.predict(features_scaled_df)
-        predictions = np.array([1 if pred == 0 else 0 for pred in raw_predictions])
+        raw_predictions = KMEANS_MODEL.predict(features_scaled)
+        predictions = np.array([KMEANS_MAPPING[c] for c in raw_predictions])
 
-        logger.debug(f"Predictions: {predictions}")
+        logger.debug(f"KMeans raw clusters: {raw_predictions}")
+        logger.debug(f"KMeans mapped predictions: {predictions}")
         return predictions
 
     except Exception as e:
@@ -285,13 +319,27 @@ def detect_anomalies_SVM(features: pd.DataFrame) -> np.ndarray:
         if features is None or features.empty:
             return np.array([])
 
-        logger.error(f"Features shape: {features.shape}")
-        logger.error(f"Features columns: {features.columns}")
-        logger.error(f"Features dtypes: {features.dtypes}")
+        expected_columns = [
+            "Flow Duration_mean",
+            "Fwd IAT Tot_mean",
+            "Fwd IAT Tot_std",
+            "Bwd IAT Max_mean",
+            "Bwd IAT Std_mean",
+        ]
 
+        features = features[expected_columns]
         features = features.astype(np.float32)
-        predictions = SVM_MODEL.predict(features)
+
+        raw_preds = SVM_MODEL.predict(features)
+
+        # Map -1 → 1 (attack), 1 → 0 (benign)
+        predictions = np.array([1 if x == -1 else 0 for x in raw_preds])
+
+        logger.debug(f"OneClassSVM raw: {raw_preds}")
+        logger.debug(f"Mapped predictions: {predictions}")
+
         return predictions
+
     except Exception as e:
         logger.error("Anomaly detection failed: %s", e)
         return np.array([])
@@ -383,6 +431,10 @@ def save_batch_to_db(pcap_path, packets, index, is_attack=False, csv_path: Path 
                 shutil.copy2(str(csv_path), str(batch_csv))
             except Exception as e:
                 logger.warning(f"Could not copy CSV file: {e}")
+        if batch_csv:
+            df = pd.read_csv(batch_csv)
+            df["Label"] = "Attack" if is_attack else "Benign"
+            df.to_csv(batch_csv, index=False)
 
         batch_doc = {
             "batch_name": batch_name,
@@ -427,6 +479,9 @@ def save_batch_to_db(pcap_path, packets, index, is_attack=False, csv_path: Path 
     except Exception as e:
         logger.error(f"Failed to save batch {index}: {e}")
         return None
+
+
+io_executor = ThreadPoolExecutor(max_workers=8)
 
 
 def process_packet_batch(buffer: list, index: int):
@@ -501,11 +556,19 @@ def process_packet_batch(buffer: list, index: int):
                     logger.warning(f"Could not delete temporary file {temp_file}: {e}")
 
 
+from model_state import get_total_packet_count, set_total_packet_count
+
+
 def handle_packet(packet):
     global packet_count, packet_buffer, file_index
 
     with lock:
-        packet_data = None
+        packet_count += 1
+
+        # ✅ increment total_packet_count via setter
+        current_total = get_total_packet_count()
+        set_total_packet_count(current_total + 1)
+
         try:
             if packet.haslayer(IP):
                 vietnam_tz = pytz.timezone("Asia/Ho_Chi_Minh")
@@ -518,15 +581,15 @@ def handle_packet(packet):
                     "protocol": packet[IP].proto,
                     "length": len(packet),
                     "info": packet.summary(),
+                    "total_packet_count": get_total_packet_count(),  # ✅ updated
                 }
-               
-                if packet_data:
-                    socketio.emit("new_packet", packet_data)
-                    logger.info(f"Emitted packet: {packet_data}")
+
+                socketio.emit("new_packet", packet_data)
+
         except Exception as e:
             logger.error(f"Error emitting packet: {e}")
+
         packet_buffer.append(packet)
-        packet_count += 1
 
         if packet_count >= CHUNK_SIZE:
             current_buffer = packet_buffer.copy()

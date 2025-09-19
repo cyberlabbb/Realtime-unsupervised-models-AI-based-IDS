@@ -18,13 +18,14 @@ const Register = () => {
   const [error, setError] = useState("");
   const navigate = useNavigate();
   const { login } = useAuth();
+
   const handleSubmit = (e) => {
     e.preventDefault();
 
     const users = JSON.parse(localStorage.getItem("users")) || [];
 
     if (users.some((user) => user.email === email)) {
-      setError("Email đã được đăng ký");
+      setError("Email is already registered");
       return;
     }
 
@@ -49,7 +50,7 @@ const Register = () => {
           sx={{ padding: 4, borderRadius: 4, width: "100%" }}
         >
           <Typography variant="h4" align="center" gutterBottom>
-            Đăng ký
+            Register
           </Typography>
 
           {error && (
@@ -61,7 +62,7 @@ const Register = () => {
           <form onSubmit={handleSubmit}>
             <TextField
               fullWidth
-              label="Tên"
+              label="Name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               margin="normal"
@@ -78,7 +79,7 @@ const Register = () => {
             />
             <TextField
               fullWidth
-              label="Mật khẩu"
+              label="Password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -92,17 +93,17 @@ const Register = () => {
               type="submit"
               sx={{ mt: 2 }}
             >
-              Đăng ký
+              Register
             </Button>
           </form>
 
           <Typography variant="body2" align="center" sx={{ mt: 3 }}>
-            Đã có tài khoản?{" "}
+            Already have an account?{" "}
             <a
               href="/login"
               style={{ color: "#1976d2", textDecoration: "none" }}
             >
-              Đăng nhập
+              Login
             </a>
           </Typography>
         </Paper>

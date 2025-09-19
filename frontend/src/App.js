@@ -16,12 +16,12 @@ import Register from "./components/Auth/Register";
 import BatchDetails from "./pages/BatchDetails";
 import BatchDetailPage from "./pages/BatchDetailPage";
 import Statistics from "./pages/Statistics";
-
+import { useLocation } from "react-router-dom";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { CaptureProvider } from "./contexts/CaptureContext";
 
 import { getBatches, getStatus } from "./services/api";
-import { setupSocket } from "./services/socket";
+import { closeSocket, setupSocket } from "./services/socket";
 
 const PrivateRoute = ({ element }) => {
   const { isAuthenticated } = useAuth();
@@ -38,7 +38,12 @@ const AppContent = () => {
   const [isCapturingActive, setIsCapturingActive] = useState(false);
   const bufferRef = useRef([]);
   const updateTimerRef = useRef(null);
-  
+  const [alertMessage, setAlertMessage] = useState("");
+  const [showAlert, setShowAlert] = useState(false);
+  const totalPacketCountRef = useRef(0);
+  const [totalPacketCount, setTotalPacketCount] = useState(0);
+  const location = useLocation();
+
   useEffect(() => {
     const fetchInitialData = async () => {
       try {
@@ -55,20 +60,47 @@ const AppContent = () => {
 
     fetchInitialData();
   }, []);
+  useEffect(() => {
+    if (location.state?.refresh) {
+      // Fetch lại danh sách batch mới nhất
+      getBatches().then((batchRes) => {
+        setBatches(batchRes.data || []);
+      });
+      // Xóa flag refresh để tránh fetch lại khi không cần thiết
+      window.history.replaceState({}, document.title);
+    }
+  }, [location]);
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        // Ngắt kết nối socket khi tab bị ẩn
+        if (window.socket) window.socket.disconnect();
+      } else if (document.visibilityState === "visible") {
+        // Kết nối lại khi tab active
+        if (window.socket && !window.socket.connected) window.socket.connect();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     const handleNewPacket = (packet) => {
       bufferRef.current.push(packet);
+      totalPacketCountRef.current += 1;
+      setTotalPacketCount(totalPacketCountRef.current);
 
       if (!updateTimerRef.current) {
         updateTimerRef.current = setTimeout(() => {
           setPackets((prev) => {
-            const combined = [...bufferRef.current, ...prev].slice(0, 1000);
+            const combined = [...bufferRef.current, ...prev].slice(0, 15);
             bufferRef.current = [];
             return combined;
           });
           updateTimerRef.current = null;
-        }, 500); // Cập nhật mỗi 500ms
+        }, 500);
       }
     };
 
@@ -86,6 +118,9 @@ const AppContent = () => {
         window.focus();
         navigate(`/batches/${alert.batch_id}`);
       };
+
+      setAlertMessage(alert.message || "Network attack detected!");
+      setShowAlert(true);
     };
 
     if (Notification.permission !== "granted") {
@@ -98,7 +133,9 @@ const AppContent = () => {
       }
     );
 
-    return () => {};
+    return () => {
+      closeSocket();
+    };
   }, []);
 
   return (
@@ -118,6 +155,11 @@ const AppContent = () => {
                   status={status}
                   batches={batches}
                   packets={packets}
+                  alertMessage={alertMessage}
+                  showAlert={showAlert}
+                  setShowAlert={setShowAlert}
+                  totalPacketCount={totalPacketCount}
+                  setTotalPacketCount={setTotalPacketCount}
                 />
               }
             />

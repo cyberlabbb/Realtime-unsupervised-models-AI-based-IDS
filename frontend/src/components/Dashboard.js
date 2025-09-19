@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useMemo, forwardRef, useRef } from "react";
-
+import React, { useState, useEffect, forwardRef, useRef, useMemo } from "react";
 import {
   Box,
   Typography,
@@ -8,84 +7,48 @@ import {
   Chip,
   TextField,
   Button,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  useMediaQuery,
+  Snackbar,
   FormControl,
   InputLabel,
   Select,
   MenuItem,
+  Tooltip,
 } from "@mui/material";
-import { Snackbar } from "@mui/material";
-import StatusPanel from "./StatusPanel";
-import TrafficChart from "./TrafficChart";
-import CaptureControl from "./CaptureControl";
-import PacketTable from "./PacketTable";
+import { ArrowForward } from "@mui/icons-material";
+import { useNavigate } from "react-router-dom";
 import { useCapture } from "../contexts/CaptureContext";
 import { setupSocket, closeSocket } from "../services/socket";
-import authService from "../services/auth";
-import { useNavigate } from "react-router-dom";
-import { getCurrentModel, selectModel } from "../services/api";
-import { ArrowForward } from "@mui/icons-material";
-import { getCaptureInterface, setCaptureInterface } from "../services/api";
+import {
+  getCurrentModel,
+  selectModel,
+  getCaptureInterface,
+  setCaptureInterface,
+} from "../services/api";
+import CaptureControl from "./CaptureControl";
+
+import PacketTable from "./PacketTable";
 
 const Dashboard = forwardRef(
-  ({ status, batches, packets: propPackets }, ref) => {
+  (
+    {
+      status,
+      batches,
+      packets,
+      alertMessage,
+      showAlert,
+      setShowAlert,
+      totalPacketCount,
+      setTotalPacketCount,
+    },
+    ref
+  ) => {
     const navigate = useNavigate();
     const { isCapturing } = useCapture();
-    const [filter, setFilter] = useState("");
-    const [dialogOpen, setDialogOpen] = useState(false);
-    const [alertDialogOpen, setAlertDialogOpen] = useState(false);
-    const [snackbarMessage, setSnackbarMessage] = useState("");
-    const isMobile = useMediaQuery("(max-width:600px)");
-    const [notification, setNotification] = useState(null);
     const [iface, setIface] = useState("");
     const [ifaceList, setIfaceList] = useState([]);
-    const [localBatches, setLocalBatches] = useState(batches || []);
     const [model, setModel] = useState("");
     const [modelList] = useState(["autoencoder", "kmeans", "svm"]);
-
-    const [alertMessage, setAlertMessage] = useState("");
-    const [showAlert, setShowAlert] = useState(false);
-
-    
-
-    const handleCloseNotification = () => {
-      setNotification(null);
-    };
-
-    useEffect(() => {
-      const fetchCurrentModel = async () => {
-        try {
-          const data = await getCurrentModel();
-          if (data.model) {
-            setModel(data.model);
-            console.log("Current model:", data.model);
-          }
-        } catch (e) {
-          console.error("Failed to fetch current model:", e);
-          setNotification("Failed to fetch current model");
-        }
-      };
-      fetchCurrentModel();
-    }, []);
-
-    // Update model change handler
-    const handleModelChange = async (event) => {
-      const selected = event.target.value;
-      try {
-        const response = await selectModel(selected);
-        if (response.status === "success") {
-          setModel(selected);
-          setNotification(`Model changed to ${selected.toUpperCase()}`);
-          console.log("Model changed successfully:", selected);
-        }
-      } catch (e) {
-        console.error("Failed to update model:", e);
-        setNotification("Failed to update model");
-      }
-    };
+    const [filter, setFilter] = useState("");
 
     useEffect(() => {
       const fetchInterface = async () => {
@@ -95,91 +58,72 @@ const Dashboard = forwardRef(
       };
       fetchInterface();
     }, []);
+
     useEffect(() => {
-      setLocalBatches(batches || []);
-    }, [batches]);
+      const fetchModel = async () => {
+        const data = await getCurrentModel();
+        if (data.model) setModel(data.model);
+      };
+      fetchModel();
+    }, []);
+
+    const handleModelChange = async (event) => {
+      const selected = event.target.value;
+      const response = await selectModel(selected);
+      if (response.status === "success") {
+        setModel(selected);
+      }
+    };
 
     const handleIfaceChange = async (event) => {
       const selected = event.target.value;
       setIface(selected);
-      try {
-        await setCaptureInterface(selected);
-      } catch (e) {
-        console.error("Failed to update capture interface:", e);
-      }
+      await setCaptureInterface(selected);
     };
 
-    const filteredPackets = useMemo(() => {
-      if (!filter) return propPackets;
-      const lower = filter.toLowerCase();
-      return propPackets.filter(
-        (packet) =>
-          (packet.src_ip && packet.src_ip.toLowerCase().includes(lower)) ||
-          (packet.dst_ip && packet.dst_ip.toLowerCase().includes(lower)) ||
-          (packet.protocol &&
-            packet.protocol.toString().toLowerCase().includes(lower)) ||
-          (packet.info && packet.info.toLowerCase().includes(lower))
-      );
-    }, [propPackets, filter]);
-
-    const exportPackets = () => {
-      const dataStr = JSON.stringify(propPackets, null, 2);
-      const blob = new Blob([dataStr], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `packets-${new Date().toISOString()}.json`;
-      link.click();
-      URL.revokeObjectURL(url);
-    };
-
-    const memoizedPacketTable = useMemo(
-      () => <PacketTable packets={filteredPackets} />,
-      [filteredPackets]
-    );
+    const visiblePackets = filter
+      ? packets.filter((packet) => {
+          const lower = filter.toLowerCase();
+          return (
+            (packet.src_ip && packet.src_ip.toLowerCase().includes(lower)) ||
+            (packet.dst_ip && packet.dst_ip.toLowerCase().includes(lower)) ||
+            (packet.protocol &&
+              packet.protocol.toString().toLowerCase().includes(lower)) ||
+            (packet.info && packet.info.toLowerCase().includes(lower))
+          );
+        })
+      : packets;
 
     const sortedBatches = useMemo(() => {
-      if (!localBatches || localBatches.length === 0) return [];
-      return [...localBatches].sort((a, b) => {
+      if (!batches || batches.length === 0) return [];
+      return [...batches].sort((a, b) => {
         const getTime = (date) => new Date(date?.$date || date).getTime();
         return getTime(b.created_at) - getTime(a.created_at);
       });
-    }, [localBatches]);
+    }, [batches]);
 
-    useEffect(() => {
-      if (Notification.permission !== "granted") {
-        Notification.requestPermission();
-      }
-
-      const handleNewBatch = (batch) => {
-        console.log("📦 NEW BATCH RECEIVED:", batch);
-        setLocalBatches((prev) => [batch, ...prev]);
-      };
-
-      const handleNewAlert = (alert) => {
-        console.log("🚨 NEW ALERT RECEIVED:", alert);
-        setAlertMessage(alert.message || "Có tấn công mạng");
-        setShowAlert(true);
-      };
-
-      setupSocket(handleNewBatch, null, handleNewAlert).catch((error) => {
-        console.error("❌ Socket connection failed:", error);
-        setNotification("Failed to connect to server");
-      });
-
-      return () => {
-        closeSocket();
-      };
-    }, [navigate]);
-    
-
-    const buffer = useRef([]);
-    const timer = useRef(null);
     return (
-      <Box sx={{ width: "100%", px: isMobile ? 1 : 4, py: 3 }}>
-        <Box sx={{ display: "flex", justifyContent: "space-between", mb: 2 }}>
-          <Typography variant="h4">
-            Network Intrusion Detection System
+      <Box sx={{ width: "100%", px: 2, py: 2 }}>
+        {/* ✅ Header */}
+        <Box
+          sx={{
+            display: "flex",
+            justifyContent: "space-between",
+            mb: 2,
+            alignItems: "center",
+          }}
+        >
+          <Typography
+            variant="h4"
+            sx={{
+              fontWeight: "bold",
+              background:
+                "linear-gradient(45deg,rgb(0, 188, 212),rgb(255, 64, 129))",
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+            }}
+          >
+            Dashboard
           </Typography>
 
           <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
@@ -200,48 +144,52 @@ const Dashboard = forwardRef(
               </Select>
             </FormControl>
 
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
-              <FormControl size="small" disabled={isCapturing}>
-                <InputLabel id="model-label">Model</InputLabel>
-                <Select
-                  labelId="model-label"
-                  value={model}
-                  label="Model"
-                  onChange={handleModelChange}
-                  sx={{ minWidth: 150 }}
-                  disabled={isCapturing}
-                >
-                  {modelList.map((opt) => (
-                    <MenuItem key={opt} value={opt}>
-                      {opt.toUpperCase()}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Box>
+            <FormControl size="small" disabled={isCapturing}>
+              <InputLabel id="model-label">Model</InputLabel>
+              <Select
+                labelId="model-label"
+                value={model}
+                label="Model"
+                onChange={handleModelChange}
+                sx={{ minWidth: 150 }}
+              >
+                {modelList.map((opt) => (
+                  <MenuItem key={opt} value={opt}>
+                    {opt.toUpperCase()}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            {/* ✅ Start/Stop Button */}
+            <CaptureControl
+              currentModel={model}
+              totalPacketCount={totalPacketCount}
+              setTotalPacketCount={setTotalPacketCount}
+            />
           </Box>
         </Box>
 
-        <Box sx={{ mb: 3 }}>
-          <CaptureControl currentModel={model} />
-        </Box>
-        <Box
-          sx={{
-            display: "flex",
-            flexDirection: isMobile ? "column" : "row",
-            gap: 3,
-            mb: 3,
-          }}
-        >
+        <Box sx={{ display: "flex", gap: 3, mb: 3 }}>
+          {/* ✅ Batch Monitor */}
           <Paper
-            id="alerts-panel"
-            elevation={3}
+            elevation={4}
             sx={{
               flex: 1,
               p: 2,
-              minHeight: 400,
-              maxHeight: 700,
-              overflowY: "auto",
+              borderRadius: 3,
+              backdropFilter: "blur(10px)",
+              backgroundColor: "rgba(255, 255, 255, 0.9)",
+              maxHeight: "80vh", // ✅ Chiều cao tối đa
+              overflowY: "auto", // ✅ Bật scroll dọc
+              scrollbarWidth: "thin", // ✅ Tinh chỉnh scroll cho Firefox
+              "&::-webkit-scrollbar": {
+                width: "6px",
+              },
+              "&::-webkit-scrollbar-thumb": {
+                backgroundColor: "#aaa",
+                borderRadius: "8px",
+              },
             }}
           >
             <Box
@@ -252,9 +200,7 @@ const Dashboard = forwardRef(
                 mb: 2,
               }}
             >
-              <Typography variant="h6" gutterBottom>
-                Real-time Batch Monitor
-              </Typography>
+              <Typography variant="h6">Real-time Batch Monitor</Typography>
               <Box sx={{ display: "flex", gap: 1 }}>
                 <Chip
                   label={`${
@@ -282,6 +228,7 @@ const Dashboard = forwardRef(
                     borderColor: batch.is_attack
                       ? "error.light"
                       : "success.light",
+                    borderRadius: 2,
                     transition: "all 0.3s ease",
                     "&:hover": {
                       transform: "translateY(-2px)",
@@ -304,17 +251,16 @@ const Dashboard = forwardRef(
                         alignItems: "center",
                       }}
                     >
-                      {batch.is_attack ? "🚨" : "✅"} Batch {batch.batch_name}
+                      {batch.is_attack ? "🚨" : "✅"} {batch.batch_name}
                     </Typography>
                     <Chip
                       label={`${batch.total_packets} packets`}
                       color={batch.is_attack ? "error" : "success"}
                       size="small"
-                      sx={{ ml: 1 }}
                     />
                   </Box>
 
-                  {/* <Box
+                  <Box
                     sx={{ mt: 1, display: "flex", gap: 2, flexWrap: "wrap" }}
                   >
                     <Typography variant="body2" color="text.secondary">
@@ -330,31 +276,24 @@ const Dashboard = forwardRef(
                     <Typography variant="body2" color="text.secondary">
                       💾 {Math.round(batch.total_bytes / 1024)} KB
                     </Typography>
-                  </Box> */}
+                  </Box>
 
                   <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
-                    <Button
-                      variant="contained"
-                      color={batch.is_attack ? "error" : "success"}
-                      size="small"
-                      onClick={() => {
-                        const batchId = batch._id?.$oid;
-                        navigate(`/batches/${batchId}`);
-                      }}
-                      endIcon={<ArrowForward />}
-                    >
-                      View Details
-                    </Button>
-                    {/* <Button
-                      variant="outlined"
-                      color={batch.is_attack ? "error" : "success"}
-                      size="small"
-                      href={getDownloadPcapUrl(batch._id?.$oid)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      Download PCAP
-                    </Button> */}
+                    <Tooltip title="View batch details">
+                      <Button
+                        variant="contained"
+                        color={batch.is_attack ? "error" : "success"}
+                        size="small"
+                        onClick={() => {
+                          const batchId = batch._id?.$oid;
+                         
+                          navigate(`/batches/${batchId}`);
+                        }}
+                        endIcon={<ArrowForward />}
+                      >
+                        View Details
+                      </Button>
+                    </Tooltip>
                   </Box>
                 </Paper>
               ))
@@ -365,77 +304,59 @@ const Dashboard = forwardRef(
             )}
           </Paper>
 
+          {/* Live Packet Capture */}
+
           <Paper
-            elevation={3}
             sx={{
-              flex: 3,
+              flex: 2,
               p: 2,
-              minHeight: 400,
-              maxHeight: 700,
+              borderRadius: 3,
+              backdropFilter: "blur(10px)",
+              backgroundColor: "rgba(255, 255, 255, 0.9)",
+              maxHeight: "80vh",
               overflowY: "auto",
+              scrollbarWidth: "thin",
+              "&::-webkit-scrollbar": {
+                width: "6px",
+              },
+              "&::-webkit-scrollbar-thumb": {
+                backgroundColor: "#aaa",
+                borderRadius: "8px",
+              },
             }}
           >
-            <Box
-              sx={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                mb: 1,
-              }}
-            >
-              <Typography variant="h6">Live Packet Capture</Typography>
+            <Typography variant="h6" gutterBottom>
+              Live Packet Capture
+            </Typography>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
               <Chip
                 label={isCapturing ? "ACTIVE" : "INACTIVE"}
                 color={isCapturing ? "success" : "error"}
+              />
+              <Chip
+                label={`Total Captured: ${totalPacketCount}`}
+                color="primary"
+                variant="outlined"
+              />
+            </Box>
+
+            <Box sx={{ my: 2 }}>
+              <TextField
+                label="Filter packets"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                fullWidth
                 size="small"
               />
             </Box>
 
-            {isCapturing ? (
-              <>
-                <Box sx={{ display: "flex", alignItems: "center", mb: 2 }}>
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ mr: 2 }}
-                  >
-                    {propPackets.length} packets captured
-                  </Typography>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={exportPackets}
-                    disabled={!propPackets.length}
-                  >
-                    Export
-                  </Button>
-                </Box>
-
-                <TextField
-                  label="Filter packets"
-                  variant="outlined"
-                  size="small"
-                  value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
-                  fullWidth
-                  sx={{ mb: 2 }}
-                  placeholder="Filter by IP, protocol or info"
-                />
-
-                {filteredPackets.length > 0 ? (
-                  memoizedPacketTable
-                ) : (
-                  <Alert severity="info">
-                    {filter
-                      ? "No packets match your filter"
-                      : "No packets captured yet"}
-                  </Alert>
-                )}
-              </>
+            {visiblePackets.length > 0 ? (
+              <PacketTable packets={visiblePackets} />
             ) : (
-              <Alert severity="info" sx={{ mt: 1 }}>
-                Packet capture is currently inactive. Click "Start Capture" to
-                begin.
+              <Alert severity="info">
+                {isCapturing
+                  ? "No packets yet"
+                  : "Click Start Capture to begin."}
               </Alert>
             )}
           </Paper>
@@ -443,16 +364,23 @@ const Dashboard = forwardRef(
 
         <Snackbar
           open={showAlert}
-          autoHideDuration={5000}
           onClose={() => setShowAlert(false)}
-          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+          anchorOrigin={{ vertical: "top", horizontal: "center" }}
+          autoHideDuration={8000}
         >
           <Alert
             onClose={() => setShowAlert(false)}
             severity="error"
-            sx={{ width: "100%" }}
+            variant="filled"
+            sx={{
+              width: "100%",
+              background: "linear-gradient(90deg, #ff1744 0%, #ff8a65 100%)",
+              color: "white",
+              fontWeight: "bold",
+              boxShadow: "0px 4px 20px rgba(0,0,0,0.4)",
+            }}
           >
-            {alertMessage}
+            🚨 {alertMessage || "Network Attack Detected!"}
           </Alert>
         </Snackbar>
       </Box>

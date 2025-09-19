@@ -27,7 +27,7 @@ from collections import Counter
 from bson.regex import Regex
 from model_state import set_model
 
-capture_interface = "Wi-Fi" 
+capture_interface = "Wi-Fi"
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
@@ -38,7 +38,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=12)
 lock = threading.Lock()
 
 load_dotenv()
@@ -114,7 +114,7 @@ def signal_handler(sig, frame):
 def run_sniff():
     """Wrapper function for sniff that respects the stop signal"""
     sniff(
-        iface= capture_interface, 
+        iface=capture_interface,
         prn=handle_packet,
         store=False,
         stop_filter=lambda x: sniff_control.is_set(),
@@ -142,7 +142,9 @@ def stop_packet_capture():
     if is_sniffing:
         sniff_control.set()
         is_sniffing = False
+        set_total_packet_count(0)
         socketio.emit("capture_status", {"is_sniffing": False})
+        socketio.emit("new_packet", {"total_packet_count": 0})
         logger.info("Packet capture stopped")
         return True
     return False
@@ -169,6 +171,7 @@ def update_capture_interface():
         logger.error(f"Failed to update interface: {e}")
         return jsonify({"error": str(e)}), 500
 
+
 import psutil
 
 
@@ -184,26 +187,30 @@ def get_capture_interface():
         return jsonify({"error": str(e)}), 500
 
 
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here')
-app.config['JWT_EXPIRATION_DELTA'] = datetime.timedelta(hours=1)
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "your-secret-key-here")
+app.config["JWT_EXPIRATION_DELTA"] = datetime.timedelta(hours=1)
 
 users_collection = db["users"]
+
 
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization')
+        token = request.headers.get("Authorization")
 
         if not token:
-            return jsonify({'message': 'Token is missing!'}), 401
+            return jsonify({"message": "Token is missing!"}), 401
 
         try:
-            data = jwt.decode(token.split()[1], app.config['SECRET_KEY'], algorithms=["HS256"])
-            current_user = users_collection.find_one({"_id": ObjectId(data['user_id'])})
+            data = jwt.decode(
+                token.split()[1], app.config["SECRET_KEY"], algorithms=["HS256"]
+            )
+            current_user = users_collection.find_one({"_id": ObjectId(data["user_id"])})
         except:
-            return jsonify({'message': 'Token is invalid!'}), 401
+            return jsonify({"message": "Token is invalid!"}), 401
 
         return f(current_user, *args, **kwargs)
+
     return decorated
 
 
@@ -219,10 +226,8 @@ def register():
 
     if users_collection.find_one({"name": data["name"]}):
         return jsonify({"error": "Username already exists"}), 400
-   
-    hashed_password = generate_password_hash(
-        data["password"]
-    )  
+
+    hashed_password = generate_password_hash(data["password"])
 
     user = {
         "name": data.get("name", ""),
@@ -231,7 +236,6 @@ def register():
         "created_at": datetime.datetime.utcnow(),
     }
 
-   
     try:
         user_id = users_collection.insert_one(user).inserted_id
     except Exception as e:
@@ -304,17 +308,20 @@ def login():
     )
 
 
-@app.route('/api/protected', methods=['GET'])
+@app.route("/api/protected", methods=["GET"])
 @token_required
 def protected_route(current_user):
-    return jsonify({
-        "message": f"Hello {current_user['name']}, this is a protected route!",
-        "user": {
-            "id": str(current_user['_id']),
-            "name": current_user['name'],
-            "email": current_user['email']
+    return jsonify(
+        {
+            "message": f"Hello {current_user['name']}, this is a protected route!",
+            "user": {
+                "id": str(current_user["_id"]),
+                "name": current_user["name"],
+                "email": current_user["email"],
+            },
         }
-    })
+    )
+
 
 @app.route("/api/status", methods=["GET"])
 def api_status():
@@ -322,8 +329,9 @@ def api_status():
     try:
         return jsonify(
             {
-                "status": "running",
+                "status": "running" if is_sniffing else "stopped",
                 "packet_count": packet_count,
+                "total_packet_count": get_total_packet_count(),
                 "buffer_size": len(packet_buffer),
                 "last_processed": file_index,
                 "is_sniffing": is_sniffing,
@@ -458,10 +466,29 @@ from flask import send_file
 
 @app.route("/api/download/csv/<batch_id>")
 def download_csv(batch_id):
-    batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
-    if batch and batch.get("csv_file_path") and os.path.exists(batch["csv_file_path"]):
-        return send_file(batch["csv_file_path"], as_attachment=True)
-    return jsonify({"error": "CSV file not found"}), 404
+    try:
+        batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
+        if not batch or not batch.get("csv_file_path"):
+            return jsonify({"error": "CSV file not found"}), 404
+
+        csv_path = batch["csv_file_path"]
+        if not os.path.exists(csv_path):
+            return jsonify({"error": "CSV file missing from disk"}), 404
+
+        df = pd.read_csv(csv_path)
+
+        # 🆕 Thêm cột Label
+        df["Label"] = "Attack" if batch.get("is_attack", False) else "Benign"
+
+        # Lưu file tạm
+        temp_path = csv_path.replace(".csv", "_labeled.csv")
+        df.to_csv(temp_path, index=False)
+
+        return send_file(temp_path, as_attachment=True)
+
+    except Exception as e:
+        logger.error(f"Failed to download CSV for batch {batch_id}: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/download/pcap/<batch_id>")
@@ -516,7 +543,6 @@ def get_batch_detail(batch_id):
 
 @app.route("/api/csv/<batch_id>")
 def get_csv_data(batch_id):
-    """Get CSV data for a specific batch"""
     try:
         batch = batches_collection.find_one({"_id": ObjectId(batch_id)})
         if not batch or not batch.get("csv_file_path"):
@@ -525,11 +551,18 @@ def get_csv_data(batch_id):
         csv_path = batch["csv_file_path"]
         if not os.path.exists(csv_path):
             return jsonify({"error": "CSV file missing from disk"}), 404
+
         df = pd.read_csv(csv_path)
 
+        # 🆕 Thêm cột Label nếu chưa có
+        if "Label" not in df.columns:
+            df["Label"] = "Attack" if batch.get("is_attack", False) else "Benign"
+        else:
+            df["Label"] = "Attack" if batch.get("is_attack", False) else "Benign"
 
         df = df.replace([np.inf, -np.inf], ["Infinity", "-Infinity"])
         df = df.fillna("null")
+
         result = {"columns": df.columns.tolist(), "rows": df.to_dict("records")}
 
         return jsonify(result)
@@ -685,6 +718,7 @@ def get_flow_summary():
         logger.error(f"Failed to summarize flows: {e}")
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/api/capture/start", methods=["POST"])
 def api_start_capture():
     """Start packet capture"""
@@ -739,19 +773,8 @@ def api_stop_capture():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/capture/status", methods=["GET"])
-def api_capture_status():
-    """Get current capture status"""
-    return jsonify(
-        {
-            "is_sniffing": is_sniffing,
-            "packet_count": packet_count,
-            "last_processed": file_index,
-        }
-    )
+from model_state import set_model, get_total_packet_count, set_total_packet_count
 
-
-from model_state import set_model  # thêm dòng này
 
 @app.route("/api/model/select", methods=["POST"])
 def select_model():
@@ -790,7 +813,7 @@ def handle_start_capture():
 @socketio.on("connect")
 def handle_connect():
     logger.info("Client connected")
-    
+
     socketio.emit(
         "capture_status", {"is_sniffing": is_sniffing, "packet_count": packet_count}
     )
@@ -828,8 +851,6 @@ if __name__ == "__main__":
             allow_unsafe_werkzeug=True,
             use_reloader=False,
             debug=True,
-            
-            
         )
     except Exception as e:
         logger.error(f"Failed to start server: {e}")

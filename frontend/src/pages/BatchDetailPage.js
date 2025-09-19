@@ -13,7 +13,9 @@ import {
   CircularProgress,
   Alert,
   TextField,
+  Typography,
 } from "@mui/material";
+
 import {
   getBatchDetail,
   getDownloadCsvUrl,
@@ -22,7 +24,6 @@ import {
   deleteBatch,
   updateBatch,
 } from "../services/api";
-import { formatVNDateTime } from "../utils/dateTime";
 
 const BatchDetailPage = () => {
   const { id } = useParams();
@@ -33,6 +34,7 @@ const BatchDetailPage = () => {
   const [error, setError] = useState(null);
   const [note, setNote] = useState("");
   const [batchMeta, setBatchMeta] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   useEffect(() => {
     const fetchBatchData = async () => {
@@ -40,7 +42,6 @@ const BatchDetailPage = () => {
         setLoading(true);
         setError(null);
 
-        // Get batch details
         const response = await getBatchDetail(id);
         if (!response || !response.batch) {
           throw new Error("Batch not found");
@@ -50,23 +51,12 @@ const BatchDetailPage = () => {
         setBatchMeta(batchData);
         setNote(batchData?.note || "");
 
-        // Only try to get CSV data if we have a csv_file_path
         if (batchData.csv_file_path) {
           try {
             const csvResult = await getCsvData(id);
-            console.log("CSV data loaded:", csvResult);
-            console.log("📦 Full CSV result:", csvResult);
-            console.log("🧪 Type:", typeof csvResult);
-            console.log("📑 Keys:", Object.keys(csvResult));
-
             setColumns(csvResult?.columns ?? []);
             setRows(csvResult?.rows ?? []);
-
-            console.log("Columns:", csvResult?.columns);
-            console.log("Rows:", csvResult?.rows);
           } catch (csvError) {
-            console.warn("CSV data not available:", csvError);
-            // Don't fail completely if CSV isn't available
             setColumns([]);
             setRows([]);
           }
@@ -84,11 +74,11 @@ const BatchDetailPage = () => {
     }
   }, [id]);
 
-
   const handleDelete = async () => {
     try {
       await deleteBatch(id);
-      navigate("/dashboard");
+      // Truyền refresh flag khi navigate
+      navigate("/dashboard", { state: { refresh: true } });
     } catch (err) {
       console.error("Delete failed:", err);
     }
@@ -97,42 +87,133 @@ const BatchDetailPage = () => {
   const handleUpdate = async () => {
     try {
       await updateBatch(id, { note });
-      alert("Cập nhật ghi chú thành công!");
+      alert("Note updated successfully!");
     } catch (err) {
       console.error("Update failed:", err);
     }
   };
 
+  const handleToggleLabel = () => {
+    const newRows = rows.map((row) => ({
+      ...row,
+      Label: batchMeta?.is_attack ? "Attack" : "Benign",
+    }));
+    setRows(newRows);
+  };
+
+  const handleExportCsv = () => {
+    const csvContent = [columns.join(",")]
+      .concat(
+        rows.map((row) =>
+          columns.map((col) => JSON.stringify(row[col] ?? "")).join(",")
+        )
+      )
+      .join("\n");
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `batch_${id}.csv`);
+    link.click();
+  };
+
+  const filteredRows = rows.filter((row) =>
+    columns.some((col) =>
+      String(row[col] || "")
+        .toLowerCase()
+        .includes(searchQuery.toLowerCase())
+    )
+  );
+
   return (
-    <Box sx={{ mt: 4, mb: 2, ml:3, mr: 4,  display: "flex", flexWrap: "wrap", gap: 2 }}>
-      <Box sx={{ mt: 4, mb: 2, display: "flex", flexWrap: "wrap", gap: 2 }}>
-        <Button variant="outlined" onClick={() => navigate("/dashboard")}>
-          🔙 Trở về Dashboard
+    <Box
+      sx={{
+        p: 3,
+        minHeight: "100vh",
+        background: "linear-gradient(135deg, #00bcd4, #ff4081)",
+      }}
+    >
+      <Typography
+        variant="h5"
+        sx={{
+          fontWeight: "bold",
+          background: "linear-gradient(90deg, #00bcd4, #ff4081)",
+          WebkitBackgroundClip: "text",
+          WebkitTextFillColor: "transparent",
+          mb: 2,
+        }}
+      >
+        Batch Detail
+      </Typography>
+
+      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2, mb: 2 }}>
+        <Button
+          variant="outlined"
+          onClick={() => navigate("/dashboard", { state: { refresh: true } })}
+          sx={{
+            background: "linear-gradient(45deg, #00bcd4, #ff4081)",
+            color: "white",
+            fontWeight: "bold",
+            "&:hover": {
+              background: "linear-gradient(45deg, #00acc1, #f50057)",
+            },
+          }}
+        >
+          🔙 Back to Dashboard
         </Button>
+
         <Button
           variant="contained"
-          color="primary"
           href={getDownloadCsvUrl(id)}
           target="_blank"
+          sx={{
+            background: "linear-gradient(45deg, #00bcd4, #ff4081)",
+            color: "white",
+            fontWeight: "bold",
+            "&:hover": {
+              background: "linear-gradient(45deg, #00acc1, #f50057)",
+            },
+          }}
         >
-          📄 Tải CSV
+          📄 Download CSV
         </Button>
+
         <Button
           variant="contained"
-          color="secondary"
           href={getDownloadPcapUrl(id)}
           target="_blank"
+          sx={{
+            background: "linear-gradient(45deg, #00bcd4, #ff4081)",
+            color: "white",
+            fontWeight: "bold",
+            "&:hover": {
+              background: "linear-gradient(45deg, #00acc1, #f50057)",
+            },
+          }}
         >
-          🗂️ Tải PCAP
+          🗂️ Download PCAP
         </Button>
-        {/* <Button variant="contained" color="error" onClick={handleDelete}>
-          🗑 Xoá Batch
-        </Button> */}
+
+        <Button
+          variant="contained"
+          onClick={handleDelete}
+          sx={{
+            background: "linear-gradient(45deg, #f44336, #ff4081)",
+            color: "white",
+            fontWeight: "bold",
+            "&:hover": {
+              background: "linear-gradient(45deg, #d32f2f, #f50057)",
+            },
+          }}
+        >
+          🗑 Delete Batch
+        </Button>
       </Box>
 
-      {/* <Paper sx={{ p: 2, mb: 2 }}>
+      <Paper elevation={5} sx={{ p: 2, mb: 3, borderRadius: 3 }}>
         <TextField
-          label="Ghi chú / Nhãn đánh giá"
+          label="Note / Annotation"
           value={note}
           onChange={(e) => setNote(e.target.value)}
           multiline
@@ -141,18 +222,31 @@ const BatchDetailPage = () => {
           sx={{ mb: 1 }}
         />
         <Button variant="outlined" onClick={handleUpdate}>
-          💾 Lưu cập nhật
+          💾 Save Note
         </Button>
-      </Paper> */}
+      </Paper>
+
+      <TextField
+        label="Search"
+        variant="outlined"
+        size="small"
+        value={searchQuery}
+        onChange={(e) => setSearchQuery(e.target.value)}
+        placeholder="Search by any column"
+        sx={{ mb: 2 }}
+      />
 
       {loading ? (
         <CircularProgress />
       ) : error ? (
         <Alert severity="error">{error}</Alert>
       ) : rows.length === 0 ? (
-        <Alert severity="info">Không có dữ liệu CSV để hiển thị.</Alert>
+        <Alert severity="info">No CSV data available to display.</Alert>
       ) : (
-        <Paper sx={{ maxHeight: 700, overflow: "auto" }}>
+        <Paper
+          elevation={5}
+          sx={{ maxHeight: 700, overflow: "auto", p: 2, borderRadius: 3 }}
+        >
           <TableContainer>
             <Table stickyHeader size="small">
               <TableHead>
@@ -163,7 +257,7 @@ const BatchDetailPage = () => {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {rows.map((row, idx) => (
+                {filteredRows.map((row, idx) => (
                   <TableRow
                     key={idx}
                     sx={

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import {
   Table,
   TableBody,
@@ -35,6 +35,7 @@ const BatchTable = ({ batches, onBatchDeleted }) => {
       return getTime(b.created_at) - getTime(a.created_at);
     });
   }, [batches]);
+
 
   const handleDeleteClick = (batch) => {
     setBatchToDelete(batch);
